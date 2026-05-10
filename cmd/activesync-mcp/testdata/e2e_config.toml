@@ -1,0 +1,31 @@
+# Copyright (C) 2026 Henry Stern
+# SPDX-License-Identifier: MIT
+#
+# Tier 3 e2e + Tier 4 scenario test config. Points at the testenv
+# Z-Push docker stack from the sibling go-activesync repo (brought up
+# by the Makefile or the CI workflow).
+#
+# The state_dir below is overridden per-test via the
+# ACTIVESYNC_MCP_STATE_DIR env var so each test gets a fresh bbolt
+# state. The literal value is a placeholder for documentation.
+#
+# Secret comes from a portable echo command — no plaintext password
+# in the file, no keyring dependency in the e2e suite.
+
+state_dir = "/tmp/activesync-mcp-e2e-state"
+log_level = "info"
+
+[[account]]
+name             = "test"
+server_url       = "http://localhost:8580/Microsoft-Server-ActiveSync"
+username         = "integration"
+device_type      = "GoActiveSyncTest"
+as_version       = "14.0"
+
+# The testenv user's password is "integration"; printf has no flags
+# that vary across distros and produces no trailing newline.
+secret = { command = ["printf", "%s", "integration"] }
+
+# Open up writes for every class — the tests need to create + delete
+# events / contacts / tasks / notes etc. for round-trip verification.
+default_access = "rw"
