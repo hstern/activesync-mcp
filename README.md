@@ -1,6 +1,8 @@
 # activesync-mcp
 
 [![ci](https://github.com/hstern/activesync-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/hstern/activesync-mcp/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/hstern/activesync-mcp/branch/main/graph/badge.svg)](https://codecov.io/gh/hstern/activesync-mcp)
+[![Go Report Card](https://goreportcard.com/badge/github.com/hstern/activesync-mcp)](https://goreportcard.com/report/github.com/hstern/activesync-mcp)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 An **MCP server** that exposes Email, Calendar, Contacts, Tasks, and Notes
