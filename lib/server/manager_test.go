@@ -403,6 +403,45 @@ func TestDefaultHTTPClient_TLSLoadError(t *testing.T) {
 	}
 }
 
+func TestPrepareListCursor_emptyResetsToZero(t *testing.T) {
+	cfg := &config.Config{Accounts: []config.Account{{
+		Name: "alpha", DefaultAccess: config.AccessRO,
+		Secret: config.SecretRef{KeyringService: "x", KeyringAccount: "alpha"},
+	}}}
+	store := &fakeStateProvider{}
+	m := NewManager(cfg, store, &fakeResolver{}, staticDeviceIDs{})
+	st := store.AccountState("alpha")
+	// Pre-populate with a stale cursor that a prior session would
+	// have left behind.
+	if err := st.SetSyncKey(context.Background(), "inbox", "K42"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.PrepareListCursor(context.Background(), "alpha", "inbox", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.SyncKey(context.Background(), "inbox")
+	if got != "0" {
+		t.Errorf("empty cursor: SyncKey = %q, want \"0\"", got)
+	}
+}
+
+func TestPrepareListCursor_passThroughResumes(t *testing.T) {
+	cfg := &config.Config{Accounts: []config.Account{{
+		Name: "alpha", Secret: config.SecretRef{KeyringService: "x", KeyringAccount: "alpha"},
+	}}}
+	store := &fakeStateProvider{}
+	m := NewManager(cfg, store, &fakeResolver{}, staticDeviceIDs{})
+
+	if err := m.PrepareListCursor(context.Background(), "alpha", "inbox", "K42"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := store.AccountState("alpha").SyncKey(context.Background(), "inbox")
+	if got != "K42" {
+		t.Errorf("SyncKey = %q, want K42", got)
+	}
+}
+
 func TestDeviceInfoFor_usesAccountFields(t *testing.T) {
 	a := &config.Account{
 		Name:       "alpha",

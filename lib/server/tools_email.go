@@ -104,6 +104,7 @@ type EmailListInput struct {
 	WindowSize  int    `json:"window_size,omitempty" jsonschema:"max items per response (default 50, server caps usually allow up to 512)"`
 	DateWindow  string `json:"date_window,omitempty" jsonschema:"limit by recency: one of none, 1d, 3d, 1w, 2w, 1m, 3m, 6m (default 2w)"`
 	BodyPreview int    `json:"body_preview_bytes,omitempty" jsonschema:"include up to N bytes of plain-text body preview per item (default 1024, set 0 to omit)"`
+	Cursor      string `json:"cursor,omitempty" jsonschema:"pagination cursor; omit for the most recent batch, pass back the sync_cursor from a prior response to fetch the next batch"`
 }
 
 // EmailRow is one item in the email_list output.
@@ -140,6 +141,12 @@ func registerEmailList(s *mcp.Server, m *Manager, accounts []string) {
 		c, err := m.Client(ctx, in.Account)
 		if err != nil {
 			return nil, EmailListOutput{}, err
+		}
+		// Pin the cursor before SyncEmail so an empty Cursor returns
+		// the top of the inbox (snapshot) rather than picking up
+		// wherever a prior session left off.
+		if err := m.PrepareListCursor(ctx, in.Account, in.FolderID, in.Cursor); err != nil {
+			return nil, EmailListOutput{}, fmt.Errorf("PrepareListCursor: %w", err)
 		}
 		opts := eas.EmailSyncOptions{
 			WindowSize:         in.WindowSize,

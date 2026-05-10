@@ -52,6 +52,7 @@ type ContactsListFoldersOutput struct {
 type ContactsListInput struct {
 	Account  string `json:"account"`
 	FolderID string `json:"folder_id"`
+	Cursor   string `json:"cursor,omitempty" jsonschema:"pagination cursor; omit for the most recent batch, pass back the sync_cursor from a prior response to fetch the next batch"`
 }
 
 // ContactRow is one entry in contacts_list / contacts_get response.
@@ -132,6 +133,9 @@ func registerContactsTools(s *mcp.Server, cfg *config.Config, m *Manager, accoun
 		c, err := m.Client(ctx, in.Account)
 		if err != nil {
 			return nil, ContactsListOutput{}, err
+		}
+		if err := m.PrepareListCursor(ctx, in.Account, in.FolderID, in.Cursor); err != nil {
+			return nil, ContactsListOutput{}, fmt.Errorf("PrepareListCursor: %w", err)
 		}
 		res, err := c.SyncContacts(ctx, in.FolderID)
 		if err != nil {
@@ -241,6 +245,7 @@ type TasksListFoldersOutput struct {
 type TasksListInput struct {
 	Account  string `json:"account"`
 	FolderID string `json:"folder_id"`
+	Cursor   string `json:"cursor,omitempty" jsonschema:"pagination cursor; omit for the most recent batch, pass back the sync_cursor from a prior response to fetch the next batch"`
 }
 
 // TaskRow is one task in tasks_list.
@@ -314,6 +319,9 @@ func registerTasksTools(s *mcp.Server, cfg *config.Config, m *Manager, accounts 
 		c, err := m.Client(ctx, in.Account)
 		if err != nil {
 			return nil, TasksListOutput{}, err
+		}
+		if err := m.PrepareListCursor(ctx, in.Account, in.FolderID, in.Cursor); err != nil {
+			return nil, TasksListOutput{}, fmt.Errorf("PrepareListCursor: %w", err)
 		}
 		res, err := c.SyncTasks(ctx, in.FolderID)
 		if err != nil {
@@ -426,6 +434,7 @@ type NotesListFoldersOutput struct {
 type NotesListInput struct {
 	Account  string `json:"account"`
 	FolderID string `json:"folder_id"`
+	Cursor   string `json:"cursor,omitempty" jsonschema:"pagination cursor; omit for the most recent batch, pass back the sync_cursor from a prior response to fetch the next batch"`
 }
 
 // NoteRow is one note in the response.
@@ -491,6 +500,9 @@ func registerNotesTools(s *mcp.Server, cfg *config.Config, m *Manager, accounts 
 		c, err := m.Client(ctx, in.Account)
 		if err != nil {
 			return nil, NotesListOutput{}, err
+		}
+		if err := m.PrepareListCursor(ctx, in.Account, in.FolderID, in.Cursor); err != nil {
+			return nil, NotesListOutput{}, fmt.Errorf("PrepareListCursor: %w", err)
 		}
 		res, err := c.SyncNotes(ctx, in.FolderID)
 		if err != nil {

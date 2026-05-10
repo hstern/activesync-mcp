@@ -122,6 +122,25 @@ func (m *Manager) SetFolderCache(p FolderCacheProvider) {
 	m.folders = p
 }
 
+// PrepareListCursor sets the per-folder SyncKey before a list-shaped
+// tool calls one of the eas Sync* methods.
+//
+// Empty cursor resets to "0" so the server returns the most recent
+// batch (the eas client transparently does the bootstrap-then-fetch
+// dance — see eas.SyncEmail's NoBootstrap doc). A non-empty cursor
+// resumes pagination from where the caller left off.
+//
+// Without this seam the persisted cursor leaks across MCP-server
+// restarts: a fresh session asking for "list my emails" would resume
+// mid-pagination from whatever the previous session was doing,
+// instead of giving the top of the inbox.
+func (m *Manager) PrepareListCursor(ctx context.Context, account, folderID, cursor string) error {
+	if cursor == "" {
+		cursor = "0"
+	}
+	return m.store.AccountState(account).SetSyncKey(ctx, folderID, cursor)
+}
+
 // SyncFolderList runs FolderSync for the account, applies any delta
 // to the per-account folder cache (if one is wired), and returns the
 // cumulative folder list. Without a cache the result is just the

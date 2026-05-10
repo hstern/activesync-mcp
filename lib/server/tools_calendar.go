@@ -93,6 +93,7 @@ type CalendarListEventsInput struct {
 	FolderID   string `json:"folder_id"`
 	WindowSize int    `json:"window_size,omitempty" jsonschema:"max events per response (default 100)"`
 	DateWindow string `json:"date_window,omitempty" jsonschema:"none, 1d, 3d, 1w, 2w, 1m, 3m, 6m (default 2w)"`
+	Cursor     string `json:"cursor,omitempty" jsonschema:"pagination cursor; omit for the most recent batch, pass back the sync_cursor from a prior response to fetch the next batch"`
 }
 
 // EventRow is one event in the list response.
@@ -126,6 +127,9 @@ func registerCalendarListEvents(s *mcp.Server, m *Manager, accounts []string) {
 		c, err := m.Client(ctx, in.Account)
 		if err != nil {
 			return nil, CalendarListEventsOutput{}, err
+		}
+		if err := m.PrepareListCursor(ctx, in.Account, in.FolderID, in.Cursor); err != nil {
+			return nil, CalendarListEventsOutput{}, fmt.Errorf("PrepareListCursor: %w", err)
 		}
 		res, err := c.SyncCalendar(ctx, in.FolderID, eas.CalendarSyncOptions{
 			WindowSize: in.WindowSize,

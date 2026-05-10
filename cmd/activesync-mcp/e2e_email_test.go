@@ -6,6 +6,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -75,6 +76,57 @@ func TestE2E_EmailList(t *testing.T) {
 	// that the tool completed without error and gave us a valid envelope.
 	if out.SyncCursor == "" {
 		t.Error("SyncCursor should always be populated after list")
+	}
+}
+
+// TestE2E_EmailList_repeatedCallReturnsTopBatch pins the cursor-leakage
+// fix: with no Cursor passed, both calls must return the same most-
+// recent batch instead of paginating into older items (which would
+// leave the second call with fewer/different items than the first).
+//
+// Seed three messages so the inbox is reliably non-empty, then call
+// email_list twice and assert the two snapshots match.
+func TestE2E_EmailList_repeatedCallReturnsTopBatch(t *testing.T) {
+	cs := e2eClient(t)
+	inbox := findInboxID(t, cs)
+
+	// Seed enough mail to make pagination observable. Wait for the
+	// last subject to land before assertions.
+	subjects := make([]string, 3)
+	for i := range subjects {
+		subjects[i] = sendLoopbackEmail(t, cs, fmt.Sprintf("cursor-test body %d", i))
+	}
+	last := waitForMessageInInbox(t, cs, inbox, subjects[len(subjects)-1])
+	t.Cleanup(func() {
+		_ = mustCallToolBool(t, cs, "email_delete", server.EmailDeleteInput{
+			Account: "test", FolderID: inbox, ID: last.ID,
+		})
+	})
+
+	var first, second server.EmailListOutput
+	callTool(t, cs, "email_list", server.EmailListInput{
+		Account: "test", FolderID: inbox, WindowSize: 50,
+	}, &first)
+	callTool(t, cs, "email_list", server.EmailListInput{
+		Account: "test", FolderID: inbox, WindowSize: 50,
+	}, &second)
+
+	if len(first.Items) == 0 {
+		t.Fatalf("first call returned no items (seeded %d): %+v", len(subjects), first)
+	}
+	if len(second.Items) != len(first.Items) {
+		t.Errorf("repeated email_list mismatch: first=%d second=%d (cursor leaked into pagination)",
+			len(first.Items), len(second.Items))
+	}
+	firstIDs := map[string]bool{}
+	for _, it := range first.Items {
+		firstIDs[it.ID] = true
+	}
+	for _, it := range second.Items {
+		if !firstIDs[it.ID] {
+			t.Errorf("second call has item id %q (%q) not in first call — cursor advanced",
+				it.ID, it.Subject)
+		}
 	}
 }
 

@@ -143,6 +143,64 @@ func TestEmailListFolders_secondCallStillReturnsCached(t *testing.T) {
 	}
 }
 
+// TestEmailList_emptyCursorResetsBeforeSync pins the cursor-leakage
+// fix: with no Cursor passed, the handler must reset the per-folder
+// SyncKey to "0" before SyncEmail so the server returns the most
+// recent batch instead of resuming a prior session's pagination.
+func TestEmailList_emptyCursorResetsBeforeSync(t *testing.T) {
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			SyncEmailFunc: func(context.Context, string, eas.EmailSyncOptions) (*eas.EmailSyncResult, error) {
+				return &eas.EmailSyncResult{SyncKey: "S1"}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	// Pre-set the per-folder cursor so we can detect the reset.
+	if err := m.store.AccountState("alpha").SetSyncKey(t.Context(), "inbox-id", "K42"); err != nil {
+		t.Fatal(err)
+	}
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+
+	callTool(t, s, "email_list", EmailListInput{Account: "alpha", FolderID: "inbox-id"})
+
+	got, _ := m.store.AccountState("alpha").SyncKey(t.Context(), "inbox-id")
+	// SyncEmail in production also writes back its own new key after
+	// the call (S1 here, set by the mock-implied-write — actually mock
+	// doesn't write, so we just assert the reset happened *before* the
+	// Sync call by checking it is no longer K42).
+	if got == "K42" {
+		t.Error("cursor not reset before SyncEmail (still K42)")
+	}
+}
+
+func TestEmailList_passedCursorIsHonored(t *testing.T) {
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			SyncEmailFunc: func(context.Context, string, eas.EmailSyncOptions) (*eas.EmailSyncResult, error) {
+				return &eas.EmailSyncResult{SyncKey: "S2"}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+
+	callTool(t, s, "email_list", EmailListInput{
+		Account: "alpha", FolderID: "inbox-id", Cursor: "K42",
+	})
+
+	got, _ := m.store.AccountState("alpha").SyncKey(t.Context(), "inbox-id")
+	// We can't observe the exact value SyncEmail saw without instrumenting
+	// the mock to capture pre-call state, so we just assert the user-supplied
+	// cursor wasn't quietly dropped (would now be "0" if the empty-path
+	// branch fired by mistake).
+	if got == "0" {
+		t.Error("cursor reset to 0 even though caller supplied K42")
+	}
+}
+
 // TestEmailListFolders_appliesDelete confirms the cache path drops
 // folders the server reports as deleted.
 func TestEmailListFolders_appliesDelete(t *testing.T) {
