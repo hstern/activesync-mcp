@@ -86,8 +86,17 @@ jobs:
       - name: build
         run: go build ./...
 
-      - name: test (race + coverage)
-        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+      # gotestsum wraps `go test` and emits JUnit XML alongside the
+      # standard Go output. Codecov's test-results-action ingests that
+      # JUnit file for Test Analytics (flaky-test detection, per-test
+      # duration trends) — a separate product from coverage.
+      - name: install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
+      - name: test (race + coverage + junit)
+        run: |
+          gotestsum --junitfile junit.xml -- \
+            -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
 
       - name: coverage summary
         if: matrix.os == 'ubuntu-latest'
@@ -110,6 +119,25 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.out
           flags: unittests
+          fail_ci_if_error: false
+
+      # Test Analytics: upload junit.xml from every matrix OS so per-OS
+      # flakiness is visible. Use `if: !cancelled()` so the upload still
+      # happens when tests fail (the whole point of flake tracking).
+      # Use codecov-action@v6 with report_type: test_results — the
+      # standalone test-results-action is deprecated; the unified
+      # action is what Codecov now reads from for the Tests page.
+      - uses: codecov/codecov-action@v6
+        if: ${{ !cancelled() }}
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./junit.xml
+          flags: unittests
+          report_type: test_results
+          # Without this the action runs `codecov upload-coverage`
+          # which silently mis-files JUnit through the coverage
+          # pipeline; `upload-test-results` is the right subcommand.
+          run_command: upload-test-results
           fail_ci_if_error: false
 
   # ------------------------------------------------------------------------
@@ -156,8 +184,26 @@ jobs:
           gnome-keyring-daemon --start --components=secrets
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> $GITHUB_ENV
 
+      - name: install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
       - name: integration tests
-        run: go test -tags integration -count=1 -timeout 5m ./...
+        run: |
+          gotestsum --junitfile junit-integration.xml -- \
+            -tags integration -count=1 -timeout 5m ./...
+
+      # Per-OS integration flakiness lands under the same flag — Test
+      # Analytics dedups by test name within a flag so cross-OS data
+      # surfaces as multiple runs of the same test, not duplicates.
+      - uses: codecov/codecov-action@v6
+        if: ${{ !cancelled() }}
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./junit-integration.xml
+          flags: integration
+          report_type: test_results
+          run_command: upload-test-results
+          fail_ci_if_error: false
 
   # ------------------------------------------------------------------------
   # Tier 3 — end-to-end tests against the go-activesync testenv (Z-Push
@@ -200,8 +246,23 @@ jobs:
             exit 1
           fi
 
+      - name: install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
       - name: e2e tests
-        run: go test -tags e2e -count=1 -timeout 10m ./...
+        run: |
+          gotestsum --junitfile junit-e2e.xml -- \
+            -tags e2e -count=1 -timeout 10m ./...
+
+      - uses: codecov/codecov-action@v6
+        if: ${{ !cancelled() }}
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./junit-e2e.xml
+          flags: e2e
+          report_type: test_results
+          run_command: upload-test-results
+          fail_ci_if_error: false
 
       - name: container logs on failure
         if: failure()
@@ -244,8 +305,23 @@ jobs:
             sleep 2
           done
 
+      - name: install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
       - name: scenario tests
-        run: go test -tags scenario -count=1 -timeout 10m ./...
+        run: |
+          gotestsum --junitfile junit-scenario.xml -- \
+            -tags scenario -count=1 -timeout 10m ./...
+
+      - uses: codecov/codecov-action@v6
+        if: ${{ !cancelled() }}
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./junit-scenario.xml
+          flags: scenario
+          report_type: test_results
+          run_command: upload-test-results
+          fail_ci_if_error: false
 
       - name: container logs on failure
         if: failure()

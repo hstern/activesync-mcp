@@ -178,6 +178,15 @@ make scenario        # tier 4 — multi-call agent-shaped flows
 make ci              # tier 1 + lint
 ```
 
+### Coverage map
+
+Concentric rings show package → file → function coverage; green is
+covered, red is not. Each segment is sized by line count, so the
+visual weight of the gaps tracks real risk. Click through for the
+underlying report.
+
+[![Coverage sunburst — concentric rings showing package, file, and function coverage across activesync-mcp; click for the full Codecov report](https://codecov.io/gh/hstern/activesync-mcp/graphs/sunburst.svg?token=YRCIJNAXRS)](https://codecov.io/gh/hstern/activesync-mcp)
+
 ## Contributing
 
 PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup, test
