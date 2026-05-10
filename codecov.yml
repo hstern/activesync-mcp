@@ -26,6 +26,13 @@ flag_management:
     - name: scenario
       paths:
         - "cmd/activesync-mcp/"
+    # Platform flags — set on every unit + integration upload alongside
+    # the suite flag (e.g. "unittests,ubuntu-latest"). Lets the Tests
+    # page slice flake data by OS without having to compose flags manually
+    # in queries.
+    - name: ubuntu-latest
+    - name: macos-latest
+    - name: windows-latest
 
 # Coverage thresholds. We don't fail PRs on coverage drops yet; this
 # section just sets the project / patch baselines Codecov reports.

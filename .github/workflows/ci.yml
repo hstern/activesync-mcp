@@ -95,8 +95,22 @@ jobs:
 
       - name: test (race + coverage + junit)
         run: |
-          gotestsum --junitfile junit.xml -- \
-            -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+          gotestsum \
+            --junitfile junit.xml \
+            --junitfile-project-name=activesync-mcp \
+            --junitfile-testsuite-name=short \
+            --junitfile-testcase-classname=short \
+            -- -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+
+      # Surface the JUnit XML as an artifact so we can debug Codecov
+      # parser behavior without re-running CI. One artifact per OS so
+      # matrix legs don't clobber each other.
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-${{ matrix.os }}
+          path: junit.xml
+          if-no-files-found: error
 
       - name: coverage summary
         if: matrix.os == 'ubuntu-latest'
@@ -124,20 +138,26 @@ jobs:
       # Test Analytics: upload junit.xml from every matrix OS so per-OS
       # flakiness is visible. Use `if: !cancelled()` so the upload still
       # happens when tests fail (the whole point of flake tracking).
-      # Use codecov-action@v6 with report_type: test_results — the
-      # standalone test-results-action is deprecated; the unified
-      # action is what Codecov now reads from for the Tests page.
-      - uses: codecov/codecov-action@v6
+      # `codecov/test-results-action@v1` is the supported action per
+      # https://docs.codecov.com/docs/test-analytics. (The docs page
+      # shows @v5 in its YAML snippet; that tag isn't actually
+      # published — only v1.x exists. Pinning to @v1 picks up the
+      # latest 1.x and is what go-activesync settled on after the same
+      # 404 bounce.) The unified codecov-action does not file uploads
+      # correctly into the Tests page — it routes them through
+      # upload-coverage no matter how `report_type` is set, which
+      # silently drops the JUnit data.
+      # Two flags: one aggregates across OSes ("unittests"), one slices
+      # by platform (the matrix os name, e.g. "ubuntu-latest"). Codecov
+      # tracks per-test data per (test name × flag) tuple, so a flake
+      # that only manifests on Windows shows up under both unittests
+      # and windows-latest while staying invisible on macos-latest.
+      - uses: codecov/test-results-action@v1
         if: ${{ !cancelled() }}
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./junit.xml
-          flags: unittests
-          report_type: test_results
-          # Without this the action runs `codecov upload-coverage`
-          # which silently mis-files JUnit through the coverage
-          # pipeline; `upload-test-results` is the right subcommand.
-          run_command: upload-test-results
+          flags: unittests,${{ matrix.os }}
           fail_ci_if_error: false
 
   # ------------------------------------------------------------------------
@@ -189,20 +209,28 @@ jobs:
 
       - name: integration tests
         run: |
-          gotestsum --junitfile junit-integration.xml -- \
-            -tags integration -count=1 -timeout 5m ./...
+          gotestsum \
+            --junitfile junit-integration.xml \
+            --junitfile-project-name=activesync-mcp \
+            --junitfile-testsuite-name=short \
+            --junitfile-testcase-classname=short \
+            -- -tags integration -count=1 -timeout 5m ./...
 
-      # Per-OS integration flakiness lands under the same flag — Test
-      # Analytics dedups by test name within a flag so cross-OS data
-      # surfaces as multiple runs of the same test, not duplicates.
-      - uses: codecov/codecov-action@v6
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-integration-${{ matrix.os }}
+          path: junit-integration.xml
+          if-no-files-found: error
+
+      # Per-platform flag in addition to "integration" — see unittests
+      # comment above for why.
+      - uses: codecov/test-results-action@v1
         if: ${{ !cancelled() }}
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./junit-integration.xml
-          flags: integration
-          report_type: test_results
-          run_command: upload-test-results
+          flags: integration,${{ matrix.os }}
           fail_ci_if_error: false
 
   # ------------------------------------------------------------------------
@@ -251,17 +279,26 @@ jobs:
 
       - name: e2e tests
         run: |
-          gotestsum --junitfile junit-e2e.xml -- \
-            -tags e2e -count=1 -timeout 10m ./...
+          gotestsum \
+            --junitfile junit-e2e.xml \
+            --junitfile-project-name=activesync-mcp \
+            --junitfile-testsuite-name=short \
+            --junitfile-testcase-classname=short \
+            -- -tags e2e -count=1 -timeout 10m ./...
 
-      - uses: codecov/codecov-action@v6
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-e2e
+          path: junit-e2e.xml
+          if-no-files-found: error
+
+      - uses: codecov/test-results-action@v1
         if: ${{ !cancelled() }}
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./junit-e2e.xml
           flags: e2e
-          report_type: test_results
-          run_command: upload-test-results
           fail_ci_if_error: false
 
       - name: container logs on failure
@@ -310,17 +347,26 @@ jobs:
 
       - name: scenario tests
         run: |
-          gotestsum --junitfile junit-scenario.xml -- \
-            -tags scenario -count=1 -timeout 10m ./...
+          gotestsum \
+            --junitfile junit-scenario.xml \
+            --junitfile-project-name=activesync-mcp \
+            --junitfile-testsuite-name=short \
+            --junitfile-testcase-classname=short \
+            -- -tags scenario -count=1 -timeout 10m ./...
 
-      - uses: codecov/codecov-action@v6
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-scenario
+          path: junit-scenario.xml
+          if-no-files-found: error
+
+      - uses: codecov/test-results-action@v1
         if: ${{ !cancelled() }}
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./junit-scenario.xml
           flags: scenario
-          report_type: test_results
-          run_command: upload-test-results
           fail_ci_if_error: false
 
       - name: container logs on failure
