@@ -318,6 +318,91 @@ func TestCoalesce(t *testing.T) {
 	}
 }
 
+func TestManager_provisionFailure(t *testing.T) {
+	// A server that returns Status=140 (RemoteWipe) on Provision is
+	// the simplest concrete failure: NewClient succeeds, but Provision
+	// surfaces the error wrapped by Manager.Client.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.ms-sync.wbxml")
+		switch r.URL.Query().Get("Cmd") {
+		case "Settings":
+			b, _ := wbxml.Marshal(&wbxml.Document{
+				Root: wbxml.E(wbxml.PageSettings, "Settings",
+					wbxml.E(wbxml.PageSettings, "Status", wbxml.Text("1")),
+				),
+			}, wbxml.DefaultRegistry())
+			w.Write(b)
+		case "Provision":
+			b, _ := wbxml.Marshal(&wbxml.Document{
+				Root: wbxml.E(wbxml.PageProvision, "Provision",
+					wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("140")),
+				),
+			}, wbxml.DefaultRegistry())
+			w.Write(b)
+		default:
+			w.WriteHeader(200)
+		}
+	}))
+	defer srv.Close()
+	m := newTestManager(t, srv)
+	_, err := m.Client(context.Background(), "alpha")
+	if err == nil || !strings.Contains(err.Error(), "provision") {
+		t.Errorf("err = %v, want one wrapped under 'provision'", err)
+	}
+}
+
+func TestManager_settingsAndNegotiateErrorsAreSwallowed(t *testing.T) {
+	// Settings/DeviceInformation and NegotiateVersion are best-effort:
+	// even if they error, Provision still runs and Client returns
+	// successfully. We exercise that by returning HTTP 500 for any
+	// Cmd other than Provision (Settings + OPTIONS) — the manager
+	// should still hand back a working client.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.ms-sync.wbxml")
+		if r.URL.Query().Get("Cmd") == "Provision" {
+			b, _ := wbxml.Marshal(&wbxml.Document{
+				Root: wbxml.E(wbxml.PageProvision, "Provision",
+					wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
+					wbxml.E(wbxml.PageProvision, "Policies",
+						wbxml.E(wbxml.PageProvision, "Policy",
+							wbxml.E(wbxml.PageProvision, "PolicyType", wbxml.Text("MS-EAS-Provisioning-WBXML")),
+							wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
+							wbxml.E(wbxml.PageProvision, "PolicyKey", wbxml.Text("OK")),
+						),
+					),
+				),
+			}, wbxml.DefaultRegistry())
+			w.Write(b)
+			return
+		}
+		http.Error(w, "settings/options unhappy", 500)
+	}))
+	defer srv.Close()
+	m := newTestManager(t, srv)
+	c, err := m.Client(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("err = %v (Settings/Negotiate failures should be swallowed)", err)
+	}
+	if c == nil {
+		t.Fatal("nil client")
+	}
+}
+
+func TestDefaultHTTPClient_TLSLoadError(t *testing.T) {
+	// A configured ClientCertFile that doesn't exist makes the TLS
+	// loader fail; defaultHTTPClient wraps the failure in a
+	// failTransport so the next RoundTrip surfaces it.
+	a := &config.Account{
+		Username: "u",
+		TLS:      config.TLSConfig{ClientCertFile: "/no/such/cert.pem", ClientKeyFile: "/no/such/key.pem"},
+	}
+	c := defaultHTTPClient(a)
+	_, err := c.Transport.RoundTrip(&http.Request{})
+	if err == nil || !strings.Contains(err.Error(), "tls:") {
+		t.Errorf("err = %v, want one wrapped under 'tls:'", err)
+	}
+}
+
 func TestDeviceInfoFor_usesAccountFields(t *testing.T) {
 	a := &config.Account{
 		Name:       "alpha",

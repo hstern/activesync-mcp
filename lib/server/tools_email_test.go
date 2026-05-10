@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
@@ -221,4 +222,66 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// Error-wrap tests for the read-side handlers.
+
+func TestEmailListFolders_wrapsError(t *testing.T) {
+	mock := &easmock.Client{FolderClient: easmock.FolderClient{
+		FolderSyncFunc: func(context.Context) (*eas.FolderSyncResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+	res := callToolErr(t, s, "email_list_folders", EmailListFoldersInput{Account: "alpha"})
+	if !contains(errText(t, res), "FolderSync") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestEmailList_wrapsError(t *testing.T) {
+	mock := &easmock.Client{EmailClient: easmock.EmailClient{
+		SyncEmailFunc: func(context.Context, string, eas.EmailSyncOptions) (*eas.EmailSyncResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+	res := callToolErr(t, s, "email_list", EmailListInput{Account: "alpha", FolderID: "i"})
+	if !contains(errText(t, res), "Sync") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestEmailGet_wrapsError(t *testing.T) {
+	mock := &easmock.Client{EmailClient: easmock.EmailClient{
+		FetchEmailFunc: func(context.Context, string, string, eas.FetchEmailOptions) (*eas.EmailItem, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+	res := callToolErr(t, s, "email_get", EmailGetInput{Account: "alpha", FolderID: "i", ID: "x"})
+	if !contains(errText(t, res), "FetchEmail") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestEmailSearch_wrapsError(t *testing.T) {
+	mock := &easmock.Client{EmailClient: easmock.EmailClient{
+		SearchEmailFunc: func(context.Context, string, eas.EmailSearchOptions) (*eas.EmailSearchResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+	res := callToolErr(t, s, "email_search", EmailSearchInput{Account: "alpha", Query: "x"})
+	if !contains(errText(t, res), "Search") {
+		t.Errorf("err = %q", errText(t, res))
+	}
 }

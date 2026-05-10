@@ -1,6 +1,9 @@
 package config
 
 import (
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -237,5 +240,151 @@ func TestExpandHome(t *testing.T) {
 	got := expandHome("~/foo")
 	if strings.HasPrefix(got, "~") {
 		t.Errorf("home not expanded: %q", got)
+	}
+}
+
+func TestLoad_filesystemRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `
+[[account]]
+name       = "work"
+server_url = "https://x"
+username   = "henry"
+secret     = { command = ["echo", "p"] }
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.Accounts) != 1 || c.Accounts[0].Name != "work" {
+		t.Errorf("accounts = %+v", c.Accounts)
+	}
+}
+
+func TestLoad_fileNotFound(t *testing.T) {
+	_, err := Load("/no/such/path/config.toml")
+	if err == nil || !strings.Contains(err.Error(), "open config") {
+		t.Errorf("err = %v, want 'open config' wrap", err)
+	}
+}
+
+func TestDecode_invalidTOML(t *testing.T) {
+	_, err := Decode(strings.NewReader("not [valid toml"))
+	if err == nil || !strings.Contains(err.Error(), "decode config") {
+		t.Errorf("err = %v, want 'decode config' wrap", err)
+	}
+}
+
+// errReader returns a non-EOF error on the first Read.
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+func TestDecode_readError(t *testing.T) {
+	_, err := Decode(errReader{})
+	if err == nil || !strings.Contains(err.Error(), "read config") {
+		t.Errorf("err = %v, want 'read config' wrap", err)
+	}
+}
+
+func TestDefaultPath_xdgConfigHome(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/xdg/config")
+	got := DefaultPath()
+	if got != "/xdg/config/activesync-mcp/config.toml" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestDefaultPath_homeFallback(t *testing.T) {
+	// Unset XDG_CONFIG_HOME so DefaultPath falls through to home/.config.
+	t.Setenv("XDG_CONFIG_HOME", "")
+	got := DefaultPath()
+	// We can't predict the home dir reliably (CI runs as different
+	// users) but we know it ends in .config/activesync-mcp/config.toml.
+	if !strings.HasSuffix(got, filepath.Join(".config", "activesync-mcp", "config.toml")) {
+		t.Errorf("got %q; want a path ending in .config/activesync-mcp/config.toml", got)
+	}
+}
+
+func TestDefaultStateDir_xdgStateHome(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "/xdg/state")
+	if got := defaultStateDir(); got != "/xdg/state/activesync-mcp" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestSecretValidate_emptyCommandName(t *testing.T) {
+	src := `
+[[account]]
+name       = "a"
+server_url = "https://x"
+username   = "u"
+secret     = { command = ["   "] }
+`
+	_, err := Decode(strings.NewReader(src))
+	if err == nil || !strings.Contains(err.Error(), "command[0] is empty") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestSecretValidate_invalidAuthScheme(t *testing.T) {
+	src := `
+[[account]]
+name       = "a"
+server_url = "https://x"
+username   = "u"
+secret     = { command = ["x"], auth_scheme = "weird" }
+`
+	_, err := Decode(strings.NewReader(src))
+	if err == nil || !strings.Contains(err.Error(), "auth_scheme must be one of") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestSecretValidate_negotiateSkipsSecretSourceCheck(t *testing.T) {
+	// auth_scheme=negotiate intentionally allows omitting both
+	// keyring_service+keyring_account and command — credentials come
+	// from the user's Kerberos ccache or keytab.
+	src := `
+[[account]]
+name       = "a"
+server_url = "https://x"
+username   = "u"
+secret     = { auth_scheme = "negotiate" }
+`
+	c, err := Decode(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("err = %v (negotiate should permit no secret source)", err)
+	}
+	if c.Accounts[0].Secret.AuthScheme != "negotiate" {
+		t.Errorf("AuthScheme = %q", c.Accounts[0].Secret.AuthScheme)
+	}
+}
+
+func TestSecretValidate_authSchemeBearer(t *testing.T) {
+	src := `
+[[account]]
+name       = "a"
+server_url = "https://x"
+username   = "u"
+secret     = { command = ["x"], auth_scheme = "bearer" }
+`
+	if _, err := Decode(strings.NewReader(src)); err != nil {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestExpandHome_homeEnvUnreadable(t *testing.T) {
+	// On a system where UserHomeDir errors, expandHome returns the
+	// input unchanged. We can't easily simulate that here, but we can
+	// at least verify expandHome returns something that doesn't start
+	// with "~" when the home lookup succeeds.
+	got := expandHome("~")
+	if got == "~" {
+		t.Errorf("expandHome(~) returned %q; expected resolution to home dir", got)
 	}
 }

@@ -90,3 +90,25 @@ func TestRunDoctor_badConfig(t *testing.T) {
 		t.Errorf("stderr: %s", e)
 	}
 }
+
+func TestRunDoctor_unreachableServer(t *testing.T) {
+	// Point at a port that nothing is listening on. The OPTIONS call
+	// should fail at the transport layer; doctor surfaces the failure
+	// per-account and exits with exitRuntime.
+	cfg := withConfigFile(t, `
+[[account]]
+name       = "alpha"
+server_url = "http://127.0.0.1:1"
+username   = "u"
+secret     = { command = ["printf", "p"] }
+`)
+	out, errF, read := tempStdio(t)
+	code := runDoctor([]string{}, &cfg, out, errF)
+	if code != exitRuntime {
+		t.Errorf("exit %d", code)
+	}
+	stdout, _ := read()
+	if !strings.Contains(stdout, "FAIL OPTIONS") {
+		t.Errorf("stdout: %s", stdout)
+	}
+}

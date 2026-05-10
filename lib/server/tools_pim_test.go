@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -603,5 +604,126 @@ func TestScopedTool_appliesEnumHint(t *testing.T) {
 	}
 	if !strings.Contains(tool.Description, "alpha") || !strings.Contains(tool.Description, "beta") {
 		t.Errorf("Description should mention both accounts, got: %q", tool.Description)
+	}
+}
+
+// Error-wrap tests for the PIM handlers. One read + one create per
+// class is enough to catch typos in the wrap message; the rest of the
+// CUD handlers all share a tiny wrap site.
+
+func TestContactsList_wrapsError(t *testing.T) {
+	mock := &easmock.Client{ContactsClient: easmock.ContactsClient{
+		SyncContactsFunc: func(context.Context, string) (*eas.ContactsSyncResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := pimMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+	res := callToolErr(t, s, "contacts_list", ContactsListInput{
+		Account: "alpha", FolderID: "contacts-id",
+	})
+	if !strings.Contains(errText(t, res), "SyncContacts") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestContactsCreate_wrapsError(t *testing.T) {
+	mock := &easmock.Client{ContactsClient: easmock.ContactsClient{
+		CreateContactFunc: func(context.Context, string, eas.ContactDraft) (string, error) {
+			return "", errors.New("boom")
+		},
+	}}
+	m := pimMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+	res := callToolErr(t, s, "contacts_create", ContactsCreateInput{
+		Account: "alpha", FolderID: "contacts-id", FirstName: "x",
+	})
+	if !strings.Contains(errText(t, res), "CreateContact") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestTasksList_wrapsError(t *testing.T) {
+	mock := &easmock.Client{TasksClient: easmock.TasksClient{
+		SyncTasksFunc: func(context.Context, string) (*eas.TasksSyncResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := pimMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+	res := callToolErr(t, s, "tasks_list", TasksListInput{
+		Account: "alpha", FolderID: "tasks-id",
+	})
+	if !strings.Contains(errText(t, res), "SyncTasks") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestTasksCreate_wrapsError(t *testing.T) {
+	mock := &easmock.Client{TasksClient: easmock.TasksClient{
+		CreateTaskFunc: func(context.Context, string, eas.TaskDraft) (string, error) {
+			return "", errors.New("boom")
+		},
+	}}
+	m := pimMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+	res := callToolErr(t, s, "tasks_create", TasksCreateInput{
+		Account: "alpha", FolderID: "tasks-id", Subject: "x",
+	})
+	if !strings.Contains(errText(t, res), "CreateTask") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestNotesList_wrapsError(t *testing.T) {
+	mock := &easmock.Client{NotesClient: easmock.NotesClient{
+		SyncNotesFunc: func(context.Context, string) (*eas.NotesSyncResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := pimMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+	res := callToolErr(t, s, "notes_list", NotesListInput{
+		Account: "alpha", FolderID: "notes-id",
+	})
+	if !strings.Contains(errText(t, res), "SyncNotes") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestNotesCreate_wrapsError(t *testing.T) {
+	mock := &easmock.Client{NotesClient: easmock.NotesClient{
+		CreateNoteFunc: func(context.Context, string, eas.NoteDraft) (string, error) {
+			return "", errors.New("boom")
+		},
+	}}
+	m := pimMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+	res := callToolErr(t, s, "notes_create", NotesCreateInput{
+		Account: "alpha", FolderID: "notes-id", Body: "x",
+	})
+	if !strings.Contains(errText(t, res), "CreateNote") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestGALSearch_wrapsError(t *testing.T) {
+	mock := &easmock.Client{SearchClient: easmock.SearchClient{
+		GALSearchFunc: func(context.Context, string, int) (*eas.GALSearchResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := pimMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+	res := callToolErr(t, s, "gal_search", GALSearchInput{Account: "alpha", Query: "x"})
+	if !strings.Contains(errText(t, res), "GALSearch") {
+		t.Errorf("err = %q", errText(t, res))
 	}
 }

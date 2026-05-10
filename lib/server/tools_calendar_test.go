@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -283,5 +284,117 @@ func TestEventRowFrom_organizerAndAttendees(t *testing.T) {
 	}
 	if !strings.Contains(row.Attendees[0], "Bob") || !strings.Contains(row.Attendees[1], "carol@x") {
 		t.Errorf("attendees = %v", row.Attendees)
+	}
+}
+
+// Error-wrap tests: each handler that calls into the EAS layer wraps
+// the error as `fmt.Errorf("Cmd: %w", err)`. The wrap is invisible
+// until something fails in production — these tests catch typos in the
+// wrap message before they ship.
+
+func TestCalendarListFolders_wrapsError(t *testing.T) {
+	mock := &easmock.Client{FolderClient: easmock.FolderClient{
+		FolderSyncFunc: func(context.Context) (*eas.FolderSyncResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := calendarMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+	res := callToolErr(t, s, "calendar_list_folders", CalendarListFoldersInput{Account: "alpha"})
+	txt := errText(t, res)
+	if !strings.Contains(txt, "FolderSync") || !strings.Contains(txt, "boom") {
+		t.Errorf("err text = %q", txt)
+	}
+}
+
+func TestCalendarListEvents_wrapsError(t *testing.T) {
+	mock := &easmock.Client{CalendarClient: easmock.CalendarClient{
+		SyncCalendarFunc: func(context.Context, string, eas.CalendarSyncOptions) (*eas.CalendarSyncResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := calendarMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+	res := callToolErr(t, s, "calendar_list_events", CalendarListEventsInput{
+		Account: "alpha", FolderID: "cal-id",
+	})
+	txt := errText(t, res)
+	if !strings.Contains(txt, "SyncCalendar") {
+		t.Errorf("err text = %q", txt)
+	}
+}
+
+func TestCalendarCreate_wrapsError(t *testing.T) {
+	mock := &easmock.Client{CalendarClient: easmock.CalendarClient{
+		CreateEventFunc: func(context.Context, string, eas.EventDraft) (string, error) {
+			return "", errors.New("boom")
+		},
+	}}
+	m := newMockManager(t, mock, mockManagerOpts{access: config.AccessRW})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+	start := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	res := callToolErr(t, s, "calendar_create_event", CalendarCreateEventInput{
+		Account: "alpha", FolderID: "cal-id", Subject: "x",
+		StartTime: start, EndTime: start.Add(time.Hour),
+	})
+	txt := errText(t, res)
+	if !strings.Contains(txt, "CreateEvent") {
+		t.Errorf("err text = %q", txt)
+	}
+}
+
+func TestCalendarUpdate_wrapsError(t *testing.T) {
+	mock := &easmock.Client{CalendarClient: easmock.CalendarClient{
+		UpdateEventFunc: func(context.Context, string, string, eas.EventDraft) error {
+			return errors.New("boom")
+		},
+	}}
+	m := newMockManager(t, mock, mockManagerOpts{access: config.AccessRW})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+	start := time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)
+	res := callToolErr(t, s, "calendar_update_event", CalendarUpdateEventInput{
+		Account: "alpha", FolderID: "cal-id", ID: "id",
+		StartTime: start, EndTime: start.Add(time.Hour),
+	})
+	if !strings.Contains(errText(t, res), "UpdateEvent") {
+		t.Errorf("err text = %q", errText(t, res))
+	}
+}
+
+func TestCalendarDelete_wrapsError(t *testing.T) {
+	mock := &easmock.Client{CalendarClient: easmock.CalendarClient{
+		DeleteEventFunc: func(context.Context, string, string) error {
+			return errors.New("boom")
+		},
+	}}
+	m := newMockManager(t, mock, mockManagerOpts{access: config.AccessRW})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+	res := callToolErr(t, s, "calendar_delete_event", CalendarDeleteEventInput{
+		Account: "alpha", FolderID: "cal-id", ID: "id",
+	})
+	if !strings.Contains(errText(t, res), "DeleteEvent") {
+		t.Errorf("err text = %q", errText(t, res))
+	}
+}
+
+func TestCalendarRespondInvite_wrapsError(t *testing.T) {
+	mock := &easmock.Client{CalendarClient: easmock.CalendarClient{
+		RespondInviteFunc: func(context.Context, string, string, eas.MeetingResponseChoice) (*eas.MeetingResponseResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := calendarMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerCalendarTools(s, m.cfg, m)
+	res := callToolErr(t, s, "calendar_respond_invite", CalendarRespondInviteInput{
+		Account: "alpha", FolderID: "i", ID: "x", Response: "accept",
+	})
+	if !strings.Contains(errText(t, res), "RespondInvite") {
+		t.Errorf("err text = %q", errText(t, res))
 	}
 }

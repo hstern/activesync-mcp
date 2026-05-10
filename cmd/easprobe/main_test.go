@@ -151,3 +151,60 @@ secret     = { command = ["printf", "p"] }
 		t.Errorf("stderr=%s", stderr.String())
 	}
 }
+
+func TestEasprobe_badConfigPath(t *testing.T) {
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	code := run([]string{"-config", "/no/such/config.toml", "-account", "x"}, stdout, stderr)
+	if code != 2 {
+		t.Errorf("exit %d", code)
+	}
+	if !strings.Contains(stderr.String(), "open config") {
+		t.Errorf("stderr=%s", stderr.String())
+	}
+}
+
+func TestEasprobe_secretCommandFails(t *testing.T) {
+	// `false` exits non-zero; the secret resolver wraps that.
+	cfg := writeConfig(t, `
+[[account]]
+name       = "x"
+server_url = "https://x"
+username   = "u"
+secret     = { command = ["false"] }
+`)
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	code := run([]string{"-config", cfg, "-account", "x"}, stdout, stderr)
+	if code != 3 {
+		t.Errorf("exit %d", code)
+	}
+	if !strings.Contains(stderr.String(), "secret command") {
+		t.Errorf("stderr=%s", stderr.String())
+	}
+}
+
+func TestEasprobe_optionsFails(t *testing.T) {
+	// Server returns 500 on OPTIONS; the run loop should bail with 3.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			http.Error(w, "boom", 500)
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	cfg := writeConfig(t, `
+[[account]]
+name       = "x"
+server_url = "`+srv.URL+`"
+username   = "u"
+secret     = { command = ["printf", "p"] }
+`)
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	code := run([]string{"-config", cfg, "-account", "x"}, stdout, stderr)
+	if code != 3 {
+		t.Errorf("exit %d", code)
+	}
+	if !strings.Contains(stderr.String(), "OPTIONS") {
+		t.Errorf("stderr=%s", stderr.String())
+	}
+}

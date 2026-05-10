@@ -5,6 +5,8 @@ package server
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"activesync-mcp/lib/config"
@@ -343,5 +345,141 @@ func TestUniqueWritableAccountsAcrossClasses(t *testing.T) {
 	got := uniqueWritableAccountsAcrossClasses(cfg)
 	if len(got) != 2 || got[0] != "rw" || got[1] != "mixed" {
 		t.Errorf("got %v", got)
+	}
+}
+
+// Error-wrap tests for the extras handlers.
+
+func TestItemCount_wrapsError(t *testing.T) {
+	mock := &easmock.Client{FolderClient: easmock.FolderClient{
+		GetItemEstimateFunc: func(context.Context, []string) ([]eas.ItemEstimate, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := extrasMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+	res := callToolErr(t, s, "item_count", ItemCountInput{
+		Account: "alpha", FolderIDs: []string{"i"},
+	})
+	if !strings.Contains(errText(t, res), "GetItemEstimate") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestResolveRecipients_wrapsError(t *testing.T) {
+	mock := &easmock.Client{SearchClient: easmock.SearchClient{
+		ResolveRecipientsFunc: func(context.Context, []string, eas.ResolveOptions) ([]eas.ResolveResponse, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := extrasMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+	res := callToolErr(t, s, "resolve_recipients", ResolveRecipientsInput{
+		Account: "alpha", Recipients: []string{"x"},
+	})
+	if !strings.Contains(errText(t, res), "ResolveRecipients") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestFolderCreate_wrapsError(t *testing.T) {
+	mock := &easmock.Client{FolderClient: easmock.FolderClient{
+		FolderCreateFunc: func(context.Context, string, string, eas.FolderType) (*eas.FolderCreateResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := extrasMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+	res := callToolErr(t, s, "folder_create", FolderCreateInput{
+		Account: "alpha", ParentID: "0", DisplayName: "X", Type: "email",
+	})
+	if !strings.Contains(errText(t, res), "FolderCreate") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestFolderRename_wrapsError(t *testing.T) {
+	mock := &easmock.Client{FolderClient: easmock.FolderClient{
+		FolderUpdateFunc: func(context.Context, string, string, string) error {
+			return errors.New("boom")
+		},
+	}}
+	m := extrasMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+	res := callToolErr(t, s, "folder_rename", FolderRenameInput{
+		Account: "alpha", ID: "x", NewDisplayName: "y",
+	})
+	if !strings.Contains(errText(t, res), "FolderUpdate") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestFolderDelete_wrapsError(t *testing.T) {
+	mock := &easmock.Client{FolderClient: easmock.FolderClient{
+		FolderDeleteFunc: func(context.Context, string) error {
+			return errors.New("boom")
+		},
+	}}
+	m := extrasMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+	res := callToolErr(t, s, "folder_delete", FolderDeleteInput{
+		Account: "alpha", ID: "x",
+	})
+	if !strings.Contains(errText(t, res), "FolderDelete") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestFolderEmpty_wrapsError(t *testing.T) {
+	mock := &easmock.Client{FolderClient: easmock.FolderClient{
+		EmptyFolderContentsFunc: func(context.Context, string, bool) error {
+			return errors.New("boom")
+		},
+	}}
+	m := extrasMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+	res := callToolErr(t, s, "folder_empty", FolderEmptyInput{
+		Account: "alpha", FolderID: "x",
+	})
+	if !strings.Contains(errText(t, res), "EmptyFolderContents") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestOofGet_wrapsError(t *testing.T) {
+	mock := &easmock.Client{SettingsClient: easmock.SettingsClient{
+		GetOofFunc: func(context.Context) (*eas.OofConfig, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := extrasMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+	res := callToolErr(t, s, "oof_get", OofGetInput{Account: "alpha"})
+	if !strings.Contains(errText(t, res), "GetOof") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestOofSet_wrapsError(t *testing.T) {
+	mock := &easmock.Client{SettingsClient: easmock.SettingsClient{
+		SetOofFunc: func(context.Context, eas.OofConfig) error {
+			return errors.New("boom")
+		},
+	}}
+	m := extrasMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+	res := callToolErr(t, s, "oof_set", OofSetInput{
+		Account: "alpha", State: "global",
+	})
+	if !strings.Contains(errText(t, res), "SetOof") {
+		t.Errorf("err = %q", errText(t, res))
 	}
 }

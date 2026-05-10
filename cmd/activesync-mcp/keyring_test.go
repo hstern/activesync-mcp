@@ -322,3 +322,64 @@ func TestReadPasswordTTY_carriageReturnTrim(t *testing.T) {
 		t.Errorf("pw = %q", pw)
 	}
 }
+
+func TestKeyringSet_passwordReadError(t *testing.T) {
+	withHooks(t)
+	hookReadPassword = func(string, io.Reader, io.Writer) (string, error) {
+		return "", errors.New("tty unreadable")
+	}
+	cfg := withConfigFile(t, testConfig)
+	out, errF, read := tempStdio(t)
+	code := runKeyring([]string{"set", "--account", "work"}, &cfg, out, errF)
+	if code != exitRuntime {
+		t.Fatalf("exit %d", code)
+	}
+	_, e := read()
+	if !strings.Contains(e, "tty unreadable") {
+		t.Errorf("stderr: %q", e)
+	}
+}
+
+func TestKeyringSet_storeError(t *testing.T) {
+	withHooks(t)
+	hookSet = func(string, string, string) error { return errors.New("backend down") }
+	cfg := withConfigFile(t, testConfig)
+	out, errF, read := tempStdio(t)
+	code := runKeyring([]string{"set", "--account", "work"}, &cfg, out, errF)
+	if code != exitRuntime {
+		t.Fatalf("exit %d", code)
+	}
+	_, e := read()
+	if !strings.Contains(e, "backend down") {
+		t.Errorf("stderr: %q", e)
+	}
+}
+
+func TestKeyringDelete_otherError(t *testing.T) {
+	_, _, delErr := withHooks(t)
+	*delErr = errors.New("backend down")
+	cfg := withConfigFile(t, testConfig)
+	out, errF, read := tempStdio(t)
+	code := runKeyring([]string{"delete", "--account", "work"}, &cfg, out, errF)
+	if code != exitRuntime {
+		t.Fatalf("exit %d", code)
+	}
+	_, e := read()
+	if !strings.Contains(e, "backend down") {
+		t.Errorf("stderr: %q", e)
+	}
+}
+
+func TestKeyring_badConfigPath(t *testing.T) {
+	withHooks(t)
+	cfg := "/no/such/file"
+	out, errF, read := tempStdio(t)
+	code := runKeyring([]string{"set", "--account", "x"}, &cfg, out, errF)
+	if code != exitConfig {
+		t.Fatalf("exit %d", code)
+	}
+	_, e := read()
+	if !strings.Contains(e, "open config") {
+		t.Errorf("stderr: %q", e)
+	}
+}

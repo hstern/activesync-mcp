@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -337,6 +338,97 @@ func TestBuildReplyMIME_alternativeAndReplyAll(t *testing.T) {
 func TestBuildReplyMIME_emptyBodyFails(t *testing.T) {
 	if _, err := buildReplyMIME("", "", false); err == nil {
 		t.Error("want error for empty body")
+	}
+}
+
+// Error-wrap tests for the write-side handlers.
+
+func TestEmailSend_wrapsError(t *testing.T) {
+	mock := &easmock.Client{EmailClient: easmock.EmailClient{
+		SendMailFunc: func(context.Context, eas.SendMailOptions) error {
+			return errors.New("boom")
+		},
+	}}
+	m := rwMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailWriteTools(s, m.cfg, m)
+	res := callToolErr(t, s, "email_send", EmailSendInput{
+		Account: "alpha",
+		To:      []EmailAddress{{Address: "x@y"}},
+		Subject: "S", BodyText: "B",
+	})
+	if !strings.Contains(errText(t, res), "SendMail") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestEmailReply_wrapsError(t *testing.T) {
+	mock := &easmock.Client{EmailClient: easmock.EmailClient{
+		SmartReplyFunc: func(context.Context, eas.ReplyForwardOptions) error {
+			return errors.New("boom")
+		},
+	}}
+	m := rwMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailWriteTools(s, m.cfg, m)
+	res := callToolErr(t, s, "email_reply", EmailReplyInput{
+		Account: "alpha", FolderID: "i", ID: "x", BodyText: "B",
+	})
+	if !strings.Contains(errText(t, res), "SmartReply") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestEmailForward_wrapsError(t *testing.T) {
+	mock := &easmock.Client{EmailClient: easmock.EmailClient{
+		SmartForwardFunc: func(context.Context, eas.ReplyForwardOptions) error {
+			return errors.New("boom")
+		},
+	}}
+	m := rwMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailWriteTools(s, m.cfg, m)
+	res := callToolErr(t, s, "email_forward", EmailForwardInput{
+		Account: "alpha", FolderID: "i", ID: "x",
+		To:       []EmailAddress{{Address: "y@z"}},
+		BodyText: "B",
+	})
+	if !strings.Contains(errText(t, res), "SmartForward") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestEmailDelete_wrapsError(t *testing.T) {
+	mock := &easmock.Client{EmailClient: easmock.EmailClient{
+		ApplyEmailChangesFunc: func(context.Context, string, []eas.EmailChange) ([]eas.EmailChangeResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := rwMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailWriteTools(s, m.cfg, m)
+	res := callToolErr(t, s, "email_delete", EmailDeleteInput{
+		Account: "alpha", FolderID: "i", ID: "x",
+	})
+	if !strings.Contains(errText(t, res), "ApplyEmailChanges") {
+		t.Errorf("err = %q", errText(t, res))
+	}
+}
+
+func TestEmailMove_wrapsError(t *testing.T) {
+	mock := &easmock.Client{FolderClient: easmock.FolderClient{
+		MoveItemsFunc: func(context.Context, string, string, []string) ([]eas.MoveItemResult, error) {
+			return nil, errors.New("boom")
+		},
+	}}
+	m := rwMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailWriteTools(s, m.cfg, m)
+	res := callToolErr(t, s, "email_move", EmailMoveInput{
+		Account: "alpha", FromFolder: "a", ToFolder: "b", IDs: []string{"x"},
+	})
+	if !strings.Contains(errText(t, res), "MoveItems") {
+		t.Errorf("err = %q", errText(t, res))
 	}
 }
 

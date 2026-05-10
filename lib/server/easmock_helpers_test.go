@@ -58,6 +58,46 @@ func newMockManager(t *testing.T, c eas.Client, opts mockManagerOpts) *Manager {
 	return m
 }
 
+// callToolErr invokes a registered tool by name and returns the
+// CallToolResult so callers can inspect IsError + content. Useful for
+// asserting that a handler wraps an EAS-layer error correctly.
+func callToolErr(t *testing.T, srv *mcp.Server, name string, args any) *mcp.CallToolResult {
+	t.Helper()
+	ct, st := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := srv.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	c := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	cs, err := c.Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// errText returns the IsError result's first text content for substring
+// assertions. Calls t.Fatal if the result isn't an error or has no text.
+func errText(t *testing.T, res *mcp.CallToolResult) string {
+	t.Helper()
+	if !res.IsError {
+		t.Fatalf("want IsError, got success: %+v", res)
+	}
+	if len(res.Content) == 0 {
+		t.Fatal("no content")
+	}
+	tc, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("content type: %T", res.Content[0])
+	}
+	return tc.Text
+}
+
 // callTool invokes a registered tool by name on srv via the in-process
 // MCP transport pair, returning the parsed JSON object from the first
 // TextContent.

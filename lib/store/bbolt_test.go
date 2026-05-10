@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -156,6 +158,24 @@ func TestResetAccount(t *testing.T) {
 	}
 	if k, _ := other.SyncKey(ctx, "inbox"); k != "OI" {
 		t.Errorf("other sync disturbed: %q", k)
+	}
+}
+
+func TestOpen_unwritablePath(t *testing.T) {
+	// Use an existing regular file as the parent directory: MkdirAll
+	// fails because the parent isn't a directory. The error path is
+	// what we want to exercise.
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(regular, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Open(filepath.Join(regular, "child", "state.db"))
+	if err == nil {
+		t.Fatal("want error opening under a non-directory parent")
+	}
+	if !strings.Contains(err.Error(), "store:") {
+		t.Errorf("err = %v, want one prefixed 'store:'", err)
 	}
 }
 

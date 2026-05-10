@@ -140,3 +140,32 @@ func TestDefaultRunner_nonzeroExit(t *testing.T) {
 		t.Errorf("err missing stderr: %v", err)
 	}
 }
+
+func TestResolve_keyringOtherError(t *testing.T) {
+	// Any error other than ErrNotFound is wrapped under "keyring lookup:"
+	// and surfaced as-is rather than the actionable "run keyring set" hint.
+	r := &SecretResolver{
+		Keyring: func(string, string) (string, error) {
+			return "", errors.New("dbus disconnected")
+		},
+	}
+	a := &Account{
+		Name:   "work",
+		Secret: SecretRef{KeyringService: "s", KeyringAccount: "u"},
+	}
+	_, err := r.Resolve(context.Background(), a)
+	if err == nil || !strings.Contains(err.Error(), "keyring lookup") {
+		t.Errorf("err = %v, want one wrapped under 'keyring lookup'", err)
+	}
+	if strings.Contains(err.Error(), "keyring set") {
+		t.Errorf("non-NotFound errors should not suggest `keyring set`: %v", err)
+	}
+}
+
+func TestDefaultRunner_argv0NotFound(t *testing.T) {
+	_, err := defaultRunner(context.Background(),
+		[]string{"/no/such/binary-9c61c0c3"})
+	if err == nil {
+		t.Fatal("want error for missing argv[0]")
+	}
+}

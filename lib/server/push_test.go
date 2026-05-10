@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -10,6 +12,8 @@ import (
 	"time"
 
 	"activesync-mcp/lib/config"
+	"github.com/hstern/go-activesync/eas"
+	"github.com/hstern/go-activesync/eas/easmock"
 	"github.com/hstern/go-activesync/wbxml"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -159,5 +163,102 @@ func TestPushController_zeroAccountsStartsNothing(t *testing.T) {
 	if n := push.Start(context.Background()); n != 0 {
 		t.Errorf("started = %d, want 0", n)
 	}
+	push.Close()
+}
+
+func TestSubscribedFolders_filtersToInboxAndCalendar(t *testing.T) {
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			FolderSyncFunc: func(context.Context) (*eas.FolderSyncResult, error) {
+				return &eas.FolderSyncResult{
+					Added: []eas.Folder{
+						{ServerID: "i", Type: eas.FolderTypeInbox},
+						{ServerID: "t", Type: eas.FolderTypeTasks},
+						{ServerID: "c", Type: eas.FolderTypeCalendar},
+						{ServerID: "n", Type: eas.FolderTypeNotes},
+					},
+				}, nil
+			},
+		},
+	}
+	p := &PushController{logger: slog.New(slog.DiscardHandler)}
+	got, err := p.subscribedFolders(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2 (inbox + calendar)", len(got))
+	}
+	classes := map[string]bool{}
+	for _, f := range got {
+		classes[f.Class] = true
+	}
+	if !classes["Email"] || !classes["Calendar"] {
+		t.Errorf("got classes = %v, want Email + Calendar", got)
+	}
+}
+
+func TestSubscribedFolders_emptyWhenNoMatchingTypes(t *testing.T) {
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			FolderSyncFunc: func(context.Context) (*eas.FolderSyncResult, error) {
+				return &eas.FolderSyncResult{
+					Added: []eas.Folder{
+						{ServerID: "t", Type: eas.FolderTypeTasks},
+					},
+				}, nil
+			},
+		},
+	}
+	p := &PushController{logger: slog.New(slog.DiscardHandler)}
+	got, err := p.subscribedFolders(context.Background(), mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty", got)
+	}
+}
+
+func TestSubscribedFolders_folderSyncError(t *testing.T) {
+	wantErr := errors.New("network down")
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			FolderSyncFunc: func(context.Context) (*eas.FolderSyncResult, error) {
+				return nil, wantErr
+			},
+		},
+	}
+	p := &PushController{logger: slog.New(slog.DiscardHandler)}
+	_, err := p.subscribedFolders(context.Background(), mock)
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want wrapped %v", err, wantErr)
+	}
+}
+
+func TestPushController_clientInitErrorReturnsCleanly(t *testing.T) {
+	// An account flagged push=true but with an unresolvable secret
+	// should not crash the watcher; it logs and returns. We can't
+	// observe the goroutine directly, but Start should report 1
+	// and the controller should remain Close-able.
+	cfg := &config.Config{
+		Accounts: []config.Account{{
+			Name: "alpha", ServerURL: "https://x", Username: "u",
+			ASVersion:     "14.1",
+			DefaultAccess: config.AccessRO,
+			Push:          true,
+			Secret:        config.SecretRef{KeyringService: "s", KeyringAccount: "alpha"},
+		}},
+	}
+	res := &fakeResolver{err: errors.New("locked")}
+	mgr := NewManager(cfg, &fakeStateProvider{}, res, staticDeviceIDs{"alpha": "dev"})
+	mcpSrv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, &mcp.ServerOptions{})
+	push := NewPushController(cfg, mgr, mcpSrv)
+	if n := push.Start(context.Background()); n != 1 {
+		t.Fatalf("started = %d", n)
+	}
+	// Goroutine returns silently; allow it to finish before Close so
+	// Close's cancel is a no-op rather than a race.
+	time.Sleep(50 * time.Millisecond)
 	push.Close()
 }
