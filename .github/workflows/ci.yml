@@ -238,9 +238,14 @@ jobs:
   # + Dovecot + Postfix + Radicale Docker stack). Linux only (docker).
   # ------------------------------------------------------------------------
   e2e:
+    name: e2e / ${{ matrix.stack }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [zpush]
     steps:
       - uses: actions/checkout@v6
       # GitHub Actions disallows checkout outside the workspace; CI
@@ -260,11 +265,11 @@ jobs:
           cache: true
 
       - name: bring up testenv
-        working-directory: go-activesync/testenv/zpush
+        working-directory: go-activesync/testenv/${{ matrix.stack }}
         run: |
           docker compose up --build -d
           for i in $(seq 1 90); do
-            status=$(docker inspect -f '{{.State.Health.Status}}' go-activesync-zpush 2>/dev/null || echo missing)
+            status=$(docker inspect -f '{{.State.Health.Status}}' "go-activesync-${{ matrix.stack }}" 2>/dev/null || echo missing)
             echo "[$i] healthcheck=$status"
             if [ "$status" = "healthy" ]; then break; fi
             sleep 2
@@ -289,7 +294,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
-          name: junit-e2e
+          name: junit-e2e-${{ matrix.stack }}
           path: junit-e2e.xml
           if-no-files-found: error
 
@@ -298,17 +303,17 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./junit-e2e.xml
-          flags: e2e
+          flags: e2e-${{ matrix.stack }}
           fail_ci_if_error: false
 
       - name: container logs on failure
         if: failure()
-        working-directory: go-activesync/testenv/zpush
+        working-directory: go-activesync/testenv/${{ matrix.stack }}
         run: docker compose logs
 
       - name: tear down
         if: always()
-        working-directory: go-activesync/testenv/zpush
+        working-directory: go-activesync/testenv/${{ matrix.stack }}
         run: docker compose down -v
 
   # ------------------------------------------------------------------------
@@ -316,9 +321,14 @@ jobs:
   # as Tier 3.
   # ------------------------------------------------------------------------
   scenario:
+    name: scenario / ${{ matrix.stack }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [zpush]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
@@ -333,11 +343,11 @@ jobs:
           cache: true
 
       - name: bring up testenv
-        working-directory: go-activesync/testenv/zpush
+        working-directory: go-activesync/testenv/${{ matrix.stack }}
         run: |
           docker compose up --build -d
           for i in $(seq 1 90); do
-            status=$(docker inspect -f '{{.State.Health.Status}}' go-activesync-zpush 2>/dev/null || echo missing)
+            status=$(docker inspect -f '{{.State.Health.Status}}' "go-activesync-${{ matrix.stack }}" 2>/dev/null || echo missing)
             if [ "$status" = "healthy" ]; then break; fi
             sleep 2
           done
@@ -357,7 +367,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
-          name: junit-scenario
+          name: junit-scenario-${{ matrix.stack }}
           path: junit-scenario.xml
           if-no-files-found: error
 
@@ -366,15 +376,15 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./junit-scenario.xml
-          flags: scenario
+          flags: scenario-${{ matrix.stack }}
           fail_ci_if_error: false
 
       - name: container logs on failure
         if: failure()
-        working-directory: go-activesync/testenv/zpush
+        working-directory: go-activesync/testenv/${{ matrix.stack }}
         run: docker compose logs
 
       - name: tear down
         if: always()
-        working-directory: go-activesync/testenv/zpush
+        working-directory: go-activesync/testenv/${{ matrix.stack }}
         run: docker compose down -v
