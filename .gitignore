@@ -1,0 +1,19 @@
+# Build / test artefacts
+*.test
+*.out
+coverage.html
+coverage.txt
+dist/
+tmp/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Per-machine agent state (Claude Code permissions etc.)
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

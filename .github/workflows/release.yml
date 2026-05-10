@@ -1,0 +1,84 @@
+# Copyright (C) 2026 Henry Stern
+# SPDX-License-Identifier: MIT
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # needed to create the GitHub release + upload assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0   # full history so --generate-notes can diff against prior tag
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          check-latest: true
+          cache: true
+
+      # Sanity gate: refuse to publish a release for a tag whose tree
+      # doesn't pass the same checks PRs do.
+      - name: lint
+        run: |
+          out=$(gofmt -l .); if [ -n "$out" ]; then echo "gofmt drift: $out"; exit 1; fi
+          go vet ./...
+          go build ./...
+
+      - name: test
+        run: go test -race -count=1 ./...
+
+      # Build cross-platform binaries. activesync-mcp is the user-facing
+      # entry point; easprobe ships alongside as a debug helper.
+      - name: build binaries
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir -p dist
+          targets=(
+            "linux amd64"
+            "linux arm64"
+            "darwin amd64"
+            "darwin arm64"
+            "windows amd64"
+          )
+          for t in "${targets[@]}"; do
+            os=$(echo "$t" | awk '{print $1}')
+            arch=$(echo "$t" | awk '{print $2}')
+            ext=""; [ "$os" = "windows" ] && ext=".exe"
+            for cmd in activesync-mcp easprobe; do
+              out="dist/${cmd}-${TAG}-${os}-${arch}${ext}"
+              echo "building $out"
+              GOOS=$os GOARCH=$arch CGO_ENABLED=0 \
+                go build -trimpath -ldflags="-s -w -X main.version=${TAG}" \
+                -o "$out" ./cmd/${cmd}
+            done
+          done
+          ls -la dist/
+
+      - name: create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          if echo "$TAG" | grep -qE '-(alpha|beta|rc)'; then
+            PRE=--prerelease
+          else
+            PRE=
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            $PRE \
+            dist/*

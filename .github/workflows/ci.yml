@@ -1,0 +1,239 @@
+# Copyright (C) 2026 Henry Stern
+# SPDX-License-Identifier: MIT
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------------
+  # Static checks: gofmt, vet, go mod tidy, govulncheck.
+  # Fast (~30s), runs on every push.
+  # ------------------------------------------------------------------------
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          check-latest: true
+          cache: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt drift in:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go mod tidy is clean
+        run: |
+          go mod tidy
+          if ! git diff --exit-code -- go.mod go.sum; then
+            echo "::error::go.mod/go.sum out of sync; run 'go mod tidy'"
+            exit 1
+          fi
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  # ------------------------------------------------------------------------
+  # Tier 1 — unit tests with race detector + coverage. Cross-platform matrix.
+  # ------------------------------------------------------------------------
+  unit-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          check-latest: true
+          cache: true
+
+      - name: build
+        run: go build ./...
+
+      - name: test (race + coverage)
+        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: coverage summary
+        if: matrix.os == 'ubuntu-latest'
+        run: go tool cover -func=coverage.out | tail -5
+
+      - uses: actions/upload-artifact@v7
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------------
+  # Tier 2 — integration tests against real OS surfaces (keyring, bbolt,
+  # signals, CLI subcommands). Cross-platform; Linux runs once per
+  # D-Bus Secret Service provider (gnome-keyring vs kwalletd6) since
+  # both are common in the wild.
+  # ------------------------------------------------------------------------
+  integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            ss-provider: keychain
+          - os: windows-latest
+            ss-provider: wincred
+          - os: ubuntu-latest
+            ss-provider: gnome-keyring
+          - os: ubuntu-latest
+            ss-provider: kwallet
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          check-latest: true
+          cache: true
+
+      - name: install + start gnome-keyring
+        if: matrix.os == 'ubuntu-latest' && matrix.ss-provider == 'gnome-keyring'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring libsecret-1-0 dbus-x11
+          eval $(dbus-launch --sh-syntax)
+          echo -n "" | gnome-keyring-daemon --unlock
+          gnome-keyring-daemon --start --components=secrets
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> $GITHUB_ENV
+
+      - name: install + start kwalletd6 in secret-service mode
+        if: matrix.os == 'ubuntu-latest' && matrix.ss-provider == 'kwallet'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y kwalletmanager kwalletd6 libsecret-1-0 dbus-x11
+          eval $(dbus-launch --sh-syntax)
+          kwalletd6 --secret-service &
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> $GITHUB_ENV
+
+      - name: integration tests
+        run: go test -tags integration -count=1 -timeout 5m ./...
+
+  # ------------------------------------------------------------------------
+  # Tier 3 — end-to-end tests against the go-activesync testenv (Z-Push
+  # + Dovecot + Postfix + Radicale Docker stack). Linux only (docker).
+  # ------------------------------------------------------------------------
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: hstern/go-activesync
+          path: ../go-activesync
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          check-latest: true
+          cache: true
+
+      - name: bring up testenv
+        working-directory: ../go-activesync/testenv
+        run: |
+          docker compose up --build -d
+          for i in $(seq 1 90); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' go-activesync-zpush 2>/dev/null || echo missing)
+            echo "[$i] healthcheck=$status"
+            if [ "$status" = "healthy" ]; then break; fi
+            sleep 2
+          done
+          if [ "$status" != "healthy" ]; then
+            docker compose logs
+            exit 1
+          fi
+
+      - name: e2e tests
+        run: go test -tags e2e -count=1 -timeout 10m ./...
+
+      - name: container logs on failure
+        if: failure()
+        working-directory: ../go-activesync/testenv
+        run: docker compose logs
+
+      - name: tear down
+        if: always()
+        working-directory: ../go-activesync/testenv
+        run: docker compose down -v
+
+  # ------------------------------------------------------------------------
+  # Tier 4 — scenario tests. Multi-call agent-shaped flows. Same testenv
+  # as Tier 3.
+  # ------------------------------------------------------------------------
+  scenario:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: hstern/go-activesync
+          path: ../go-activesync
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          check-latest: true
+          cache: true
+
+      - name: bring up testenv
+        working-directory: ../go-activesync/testenv
+        run: |
+          docker compose up --build -d
+          for i in $(seq 1 90); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' go-activesync-zpush 2>/dev/null || echo missing)
+            if [ "$status" = "healthy" ]; then break; fi
+            sleep 2
+          done
+
+      - name: scenario tests
+        run: go test -tags scenario -count=1 -timeout 10m ./...
+
+      - name: container logs on failure
+        if: failure()
+        working-directory: ../go-activesync/testenv
+        run: docker compose logs
+
+      - name: tear down
+        if: always()
+        working-directory: ../go-activesync/testenv
+        run: docker compose down -v
