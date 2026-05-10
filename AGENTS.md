@@ -17,7 +17,6 @@ Layout:
 
 ```
 cmd/activesync-mcp/        CLI entry point + subcommands (serve / keyring / autodiscover / doctor)
-cmd/easprobe/              standalone EAS protocol debug CLI
 lib/config/                TOML parsing, secret resolution (keyring | command), per-account config
 lib/server/                MCP server build + tool registration + per-account Manager
 lib/store/                 bbolt-backed eas.StateStore (PolicyKey + per-folder SyncKey)
@@ -164,7 +163,6 @@ cmd/activesync-mcp/
   keyring.go                          OS keyring set/get/delete subcommand
   autodiscover.go                     EAS endpoint discovery subcommand
   doctor.go                           config validation + per-account probe
-cmd/easprobe/main.go                  standalone EAS debug CLI
 lib/config/
   config.go                           TOML schema + load
   secrets.go                          keyring | command secret resolution

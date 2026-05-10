@@ -40,8 +40,7 @@ jobs:
       - name: test
         run: go test -race -count=1 ./...
 
-      # Build cross-platform binaries. activesync-mcp is the user-facing
-      # entry point; easprobe ships alongside as a debug helper.
+      # Build cross-platform binaries.
       - name: build binaries
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
@@ -57,13 +56,11 @@ jobs:
             os=$(echo "$t" | awk '{print $1}')
             arch=$(echo "$t" | awk '{print $2}')
             ext=""; [ "$os" = "windows" ] && ext=".exe"
-            for cmd in activesync-mcp easprobe; do
-              out="dist/${cmd}-${TAG}-${os}-${arch}${ext}"
-              echo "building $out"
-              GOOS=$os GOARCH=$arch CGO_ENABLED=0 \
-                go build -trimpath -ldflags="-s -w -X main.version=${TAG}" \
-                -o "$out" ./cmd/${cmd}
-            done
+            out="dist/activesync-mcp-${TAG}-${os}-${arch}${ext}"
+            echo "building $out"
+            GOOS=$os GOARCH=$arch CGO_ENABLED=0 \
+              go build -trimpath -ldflags="-s -w -X main.version=${TAG}" \
+              -o "$out" ./cmd/activesync-mcp
           done
           ls -la dist/
 
