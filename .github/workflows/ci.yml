@@ -247,6 +247,13 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     timeout-minutes: 15
+    # kwalletd6 and ksecretd are Qt apps; without a display server
+    # they segfault unless Qt picks the offscreen platform plugin.
+    # Set this for the whole job so every step that touches a Qt
+    # binary (probe, daemon launch, the test process if it ever
+    # goes via Qt) gets it.
+    env:
+      QT_QPA_PLATFORM: offscreen
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: install system deps
@@ -271,66 +278,46 @@ jobs:
         # repo with mismatched ownership.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: probe kwalletd6 surface
-        # KF6 split the daemon's Secret Service support out of the
-        # `--secret-service` CLI flag (KF5 had it). Print the binary
-        # surface so we can see exactly what's available before
-        # iterating: usage text, package contents, and any
-        # secret-service-named files in the package.
-        run: |
-          which kwalletd6 || true
-          kwalletd6 --help 2>&1 | head -40 || true
-          echo "--- pacman -Ql kwallet ---"
-          pacman -Ql kwallet | grep -E "bin/|secret" | head -30 || true
-          echo "--- /usr/share/dbus-1 services ---"
-          ls /usr/share/dbus-1/services/ 2>/dev/null | grep -iE "kwallet|secret" || true
-
-      - name: start dbus session + kwalletd6
-        env:
-          # kwalletd6 is a Qt app. Without a display server it
-          # segfaults at QApplication construction unless we point
-          # Qt at the offscreen platform plugin.
-          QT_QPA_PLATFORM: offscreen
+      - name: start dbus session + ksecretd
         run: |
           # GitHub Actions doesn't give the container a session bus by
           # default; spin one up. dbus-launch returns the address +
-          # process id; export the address so kwalletd6 (and the test
-          # binary it talks to) can find it.
+          # process id; export the address so the daemon and the test
+          # binary that talks to it can find it.
           eval "$(dbus-launch --sh-syntax)"
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
-          echo "QT_QPA_PLATFORM=offscreen" >> "$GITHUB_ENV"
 
-          # KF6 ships kwalletd6 without the KF5 `--secret-service`
-          # CLI flag. The daemon still registers `org.kde.kwalletd6`
-          # automatically; the Secret Service interface
-          # (org.freedesktop.secrets) is provided by activating the
-          # daemon via the dbus .service file shipped with the
-          # package. Run the daemon directly here so we can see its
-          # logs; the bus probe below confirms which name(s) it owns.
-          kwalletd6 >/tmp/kwalletd6.log 2>&1 &
-          KWPID=$!
+          # KF6 split Secret Service support out of kwalletd6 into a
+          # separate daemon, ksecretd, which implements the
+          # freedesktop.org Secret Service spec on top of kwallet
+          # storage (and registers org.kde.secretservicecompat plus
+          # org.freedesktop.secrets on the bus). The KF5
+          # `kwalletd5 --secret-service` flag is gone; this is its
+          # replacement.
+          ksecretd >/tmp/ksecretd.log 2>&1 &
+          DAEMON_PID=$!
 
-          # Wait for kwalletd6 to register on the bus before the first
-          # test call. If the daemon isn't reachable within 10s,
-          # surface its log and fail the step so we don't waste a 5m
-          # test timeout chasing a daemon that never started.
+          # Wait for the Secret Service bus name to register. If it
+          # doesn't appear in 10s, surface the daemon's log and fail
+          # the step so the keyring tests don't silently skip with
+          # "OS keyring unreachable".
           for i in $(seq 1 20); do
             if dbus-send --session --print-reply --dest=org.freedesktop.DBus \
                 /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner \
                 string:org.freedesktop.secrets 2>/dev/null \
                 | grep -q "boolean true"; then
-              echo "kwalletd6 registered on the Secret Service bus name"
+              echo "ksecretd registered on the Secret Service bus name"
               exit 0
             fi
-            if ! kill -0 "$KWPID" 2>/dev/null; then
-              echo "::error::kwalletd6 exited before registering"
-              cat /tmp/kwalletd6.log || true
+            if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+              echo "::error::ksecretd exited before registering"
+              cat /tmp/ksecretd.log || true
               exit 1
             fi
             sleep 0.5
           done
-          echo "::error::kwalletd6 did not register on the bus within 10s"
-          cat /tmp/kwalletd6.log || true
+          echo "::error::ksecretd did not register on the bus within 10s"
+          cat /tmp/ksecretd.log || true
           exit 1
 
       - name: install gotestsum
