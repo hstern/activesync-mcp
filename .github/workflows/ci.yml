@@ -278,16 +278,22 @@ jobs:
         # repo with mismatched ownership.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: start ksecretd + bootstrap default collection
+      - name: start ksecretd + alias an existing collection as default
         # Architecture note (KF6): ksecretd is the actual Secret
         # Service implementation — it owns the storage and registers
         # org.freedesktop.secrets on the bus. kwalletd6 is a separate
         # binary that wraps ksecretd to expose the legacy KDE-specific
         # KWallet API for KDE apps; we do NOT need it here, since
-        # zalando/go-keyring talks raw Secret Service. Starting
-        # kwalletd6 actually hurts — its first-use wallet password
-        # prompt is what blocked the bootstrap step in earlier
-        # iterations.
+        # zalando/go-keyring talks raw Secret Service.
+        #
+        # Bootstrap strategy: ksecretd creates an unaliased default
+        # collection on first launch but doesn't wire it to the
+        # `default` alias the SS spec mandates. CreateCollection /
+        # secret-tool both block on a Prompt object (master-password
+        # UI) we can't satisfy headlessly. Instead, list whatever
+        # collections ksecretd already has via the read-only
+        # Properties.Collections accessor and SetAlias("default") the
+        # first one — both are no-prompt operations.
         run: |
           eval "$(dbus-launch --sh-syntax)"
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
@@ -310,26 +316,33 @@ jobs:
             sleep 0.5
           done
 
-          # Use secret-tool (libsecret) to force creation of the
-          # default collection. secret-tool builds a proper
-          # Properties dict (with the required
-          # org.freedesktop.Secret.Collection.Label) for us, which
-          # raw `dbus-send dict:string:variant:` can't do cleanly.
-          # The store-then-clear pair is what wires the `default`
-          # alias the SS spec expects; without it,
-          # zalando/go-keyring fails with "Alias default does not
-          # exist" and the keyring tests silently skip.
-          timeout 30 secret-tool store --label=init init init <<<'init' \
-            >/tmp/secrettool.log 2>&1 || {
-              echo "::error::secret-tool store failed:"
-              cat /tmp/secrettool.log
-              cat /tmp/ksecretd.log
-              exit 1
-            }
-          secret-tool clear init init || true
+          # Read existing collections.
+          echo "--- existing collections ---"
+          dbus-send --session --print-reply \
+            --dest=org.freedesktop.secrets \
+            /org/freedesktop/secrets \
+            org.freedesktop.DBus.Properties.Get \
+            string:org.freedesktop.Secret.Service \
+            string:Collections | tee /tmp/collections.txt
 
-          # Confirm: ReadAlias("default") should now resolve to
-          # something other than the null path "/".
+          # Pull the first object path out of the dbus-send output.
+          # Format: `      object path "/org/freedesktop/secrets/collection/whatever"`
+          COLL=$(grep -oE 'object path "[^"]+"' /tmp/collections.txt | head -1 | sed -E 's/object path "([^"]+)"/\1/')
+          if [ -z "$COLL" ]; then
+            echo "::error::ksecretd has no collections to alias"
+            cat /tmp/ksecretd.log
+            exit 1
+          fi
+          echo "aliasing default -> $COLL"
+
+          dbus-send --session --print-reply \
+            --dest=org.freedesktop.secrets \
+            /org/freedesktop/secrets \
+            org.freedesktop.Secret.Service.SetAlias \
+            string:default \
+            objpath:"$COLL"
+
+          echo "--- ReadAlias(default) confirms ---"
           dbus-send --session --print-reply \
             --dest=org.freedesktop.secrets \
             /org/freedesktop/secrets \
