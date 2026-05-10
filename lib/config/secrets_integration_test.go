@@ -17,21 +17,19 @@ import (
 	"time"
 )
 
-// printArgv builds a portable shell-out command that prints its single
-// argument verbatim and exits 0. We avoid `printf` (different flag
-// handling on Windows) and `echo` (adds quotes on PowerShell) by
-// running `go run` against a tiny embedded program — overkill for unit
-// tests but the only thing genuinely portable.
+// printArgv builds a cross-platform command that prints `payload`
+// verbatim (no trailing newline) and exits 0.
 //
-// Cheaper alternative: use the platform's built-in `printf`/`echo`
-// where the behaviour matters less, falling back to PowerShell on
-// Windows. That's what we do here.
+//   - Unix: `printf` is in coreutils, doesn't add newlines, doesn't
+//     quote.
+//   - Windows: PowerShell's [Console]::Out.Write avoids cmd.exe's
+//     redirect-quoting hell. exec.Command splits args literally so
+//     `cmd /c set /p= <NUL` doesn't actually redirect — only a single
+//     joined command string would. PowerShell sidesteps that entirely.
 func printArgv(payload string) []string {
 	if runtime.GOOS == "windows" {
-		// `cmd /c set /p=` writes the value with no trailing newline;
-		// then `< nul` shorts the prompt. Slightly arcane but it's the
-		// most portable no-newline echo in cmd.exe.
-		return []string{"cmd", "/c", "set", "/p", "=" + payload, "<NUL"}
+		return []string{"powershell", "-NoProfile", "-NonInteractive",
+			"-Command", "[Console]::Out.Write('" + payload + "')"}
 	}
 	return []string{"printf", "%s", payload}
 }
@@ -130,10 +128,16 @@ func TestSecretCommand_StderrSurfacedOnFailure(t *testing.T) {
 func TestSecretCommand_ContextDeadlineHonoured(t *testing.T) {
 	var argv []string
 	if runtime.GOOS == "windows" {
-		// `timeout` waits up to N seconds.
-		argv = []string{"cmd", "/c", "timeout", "/t", "5", "/nobreak"}
+		// `timeout` waits up to N seconds. Run it directly (not via
+		// cmd /c) so context cancellation kills the actual blocking
+		// process — going through cmd would orphan a grandchild.
+		argv = []string{"timeout", "/t", "5", "/nobreak"}
 	} else {
-		argv = []string{"sh", "-c", "sleep 5"}
+		// Run sleep directly. `sh -c "sleep 5"` would put sleep in a
+		// sub-process; killing sh leaves sleep running and Go's exec
+		// waits for inherited stdio pipes, so cmd.Wait blocks the
+		// full 5s and the deadline assertion fires.
+		argv = []string{"sleep", "5"}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
