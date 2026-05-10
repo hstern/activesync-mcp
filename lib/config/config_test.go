@@ -294,8 +294,9 @@ func TestDecode_readError(t *testing.T) {
 func TestDefaultPath_xdgConfigHome(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/xdg/config")
 	got := DefaultPath()
-	if got != "/xdg/config/activesync-mcp/config.toml" {
-		t.Errorf("got %q", got)
+	want := filepath.Join("/xdg/config", "activesync-mcp", "config.toml")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
@@ -312,8 +313,9 @@ func TestDefaultPath_homeFallback(t *testing.T) {
 
 func TestDefaultStateDir_xdgStateHome(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "/xdg/state")
-	if got := defaultStateDir(); got != "/xdg/state/activesync-mcp" {
-		t.Errorf("got %q", got)
+	want := filepath.Join("/xdg/state", "activesync-mcp")
+	if got := defaultStateDir(); got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
