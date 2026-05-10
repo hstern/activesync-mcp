@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/hstern/go-activesync/eas"
 )
 
 func tempDB(t *testing.T) *DB {
@@ -158,6 +160,143 @@ func TestResetAccount(t *testing.T) {
 	}
 	if k, _ := other.SyncKey(ctx, "inbox"); k != "OI" {
 		t.Errorf("other sync disturbed: %q", k)
+	}
+}
+
+func TestFolderCache_appliesAddUpdateDelete(t *testing.T) {
+	db := tempDB(t)
+	cache := db.FolderCache("work")
+
+	// First sync: server returns the entire hierarchy in Added.
+	if err := cache.Apply(&eas.FolderSyncResult{
+		SyncKey: "FS1",
+		Added: []eas.Folder{
+			{ServerID: "inbox", DisplayName: "Inbox", Type: eas.FolderTypeInbox},
+			{ServerID: "sent", DisplayName: "Sent", Type: eas.FolderTypeSentItems},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cache.All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("after first apply, got %d folders, want 2", len(got))
+	}
+
+	// Second sync: an update + a new folder + a delete.
+	if err := cache.Apply(&eas.FolderSyncResult{
+		SyncKey: "FS2",
+		Added:   []eas.Folder{{ServerID: "drafts", DisplayName: "Drafts", Type: eas.FolderTypeDrafts}},
+		Updated: []eas.Folder{{ServerID: "inbox", DisplayName: "Inbox (renamed)", Type: eas.FolderTypeInbox}},
+		Deleted: []string{"sent"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = cache.All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]eas.Folder{}
+	for _, f := range got {
+		byID[f.ServerID] = f
+	}
+	if len(byID) != 2 {
+		t.Errorf("after delete + add, want 2 folders, got %d (%v)", len(byID), byID)
+	}
+	if byID["inbox"].DisplayName != "Inbox (renamed)" {
+		t.Errorf("Updated didn't replace existing folder: %+v", byID["inbox"])
+	}
+	if _, has := byID["sent"]; has {
+		t.Error("Deleted folder is still present")
+	}
+	if _, has := byID["drafts"]; !has {
+		t.Error("Newly Added folder missing")
+	}
+}
+
+func TestFolderCache_perAccountIsolation(t *testing.T) {
+	db := tempDB(t)
+	work := db.FolderCache("work")
+	personal := db.FolderCache("personal")
+
+	if err := work.Apply(&eas.FolderSyncResult{
+		Added: []eas.Folder{{ServerID: "w-inbox", DisplayName: "Work Inbox"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := personal.Apply(&eas.FolderSyncResult{
+		Added: []eas.Folder{{ServerID: "p-inbox", DisplayName: "Personal Inbox"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wf, _ := work.All()
+	pf, _ := personal.All()
+	if len(wf) != 1 || wf[0].ServerID != "w-inbox" {
+		t.Errorf("work folders bled: %+v", wf)
+	}
+	if len(pf) != 1 || pf[0].ServerID != "p-inbox" {
+		t.Errorf("personal folders bled: %+v", pf)
+	}
+}
+
+func TestFolderCache_emptyAccountReturnsEmpty(t *testing.T) {
+	db := tempDB(t)
+	got, err := db.FolderCache("never-used").All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d folders for fresh account, want 0", len(got))
+	}
+}
+
+func TestFolderCache_persistsAcrossOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+	db1, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db1.FolderCache("work").Apply(&eas.FolderSyncResult{
+		Added: []eas.Folder{{ServerID: "inbox", DisplayName: "Inbox"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db1.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	got, err := db2.FolderCache("work").All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ServerID != "inbox" {
+		t.Errorf("not persisted: %+v", got)
+	}
+}
+
+func TestResetAccount_clearsFolderCache(t *testing.T) {
+	db := tempDB(t)
+	if err := db.FolderCache("work").Apply(&eas.FolderSyncResult{
+		Added: []eas.Folder{{ServerID: "x"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ResetAccount("work"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.FolderCache("work").All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ResetAccount didn't clear folder cache: %+v", got)
 	}
 }
 

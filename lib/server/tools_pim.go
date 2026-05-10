@@ -112,16 +112,12 @@ func registerContactsTools(s *mcp.Server, cfg *config.Config, m *Manager, accoun
 	folderTool := &mcp.Tool{Name: "contacts_list_folders", Description: "List contact folders for an account."}
 	scopeEnum(folderTool, "account", accounts)
 	mcp.AddTool(s, folderTool, func(ctx context.Context, _ *mcp.CallToolRequest, in ContactsListFoldersInput) (*mcp.CallToolResult, ContactsListFoldersOutput, error) {
-		c, err := m.Client(ctx, in.Account)
+		folders, err := m.SyncFolderList(ctx, in.Account)
 		if err != nil {
 			return nil, ContactsListFoldersOutput{}, err
 		}
-		fs, err := c.FolderSync(ctx)
-		if err != nil {
-			return nil, ContactsListFoldersOutput{}, fmt.Errorf("FolderSync: %w", err)
-		}
 		out := ContactsListFoldersOutput{}
-		for _, f := range fs.Added {
+		for _, f := range folders {
 			if f.Type != eas.FolderTypeContacts && f.Type != eas.FolderTypeUserContacts {
 				continue
 			}
@@ -298,16 +294,12 @@ func registerTasksTools(s *mcp.Server, cfg *config.Config, m *Manager, accounts 
 	folderTool := &mcp.Tool{Name: "tasks_list_folders", Description: "List task folders for an account."}
 	scopeEnum(folderTool, "account", accounts)
 	mcp.AddTool(s, folderTool, func(ctx context.Context, _ *mcp.CallToolRequest, in TasksListFoldersInput) (*mcp.CallToolResult, TasksListFoldersOutput, error) {
-		c, err := m.Client(ctx, in.Account)
+		folders, err := m.SyncFolderList(ctx, in.Account)
 		if err != nil {
 			return nil, TasksListFoldersOutput{}, err
 		}
-		fs, err := c.FolderSync(ctx)
-		if err != nil {
-			return nil, TasksListFoldersOutput{}, fmt.Errorf("FolderSync: %w", err)
-		}
 		out := TasksListFoldersOutput{}
-		for _, f := range fs.Added {
+		for _, f := range folders {
 			if f.Type != eas.FolderTypeTasks && f.Type != eas.FolderTypeUserTasks {
 				continue
 			}
@@ -479,16 +471,12 @@ func registerNotesTools(s *mcp.Server, cfg *config.Config, m *Manager, accounts 
 	folderTool := &mcp.Tool{Name: "notes_list_folders", Description: "List note folders for an account."}
 	scopeEnum(folderTool, "account", accounts)
 	mcp.AddTool(s, folderTool, func(ctx context.Context, _ *mcp.CallToolRequest, in NotesListFoldersInput) (*mcp.CallToolResult, NotesListFoldersOutput, error) {
-		c, err := m.Client(ctx, in.Account)
+		folders, err := m.SyncFolderList(ctx, in.Account)
 		if err != nil {
 			return nil, NotesListFoldersOutput{}, err
 		}
-		fs, err := c.FolderSync(ctx)
-		if err != nil {
-			return nil, NotesListFoldersOutput{}, fmt.Errorf("FolderSync: %w", err)
-		}
 		out := NotesListFoldersOutput{}
-		for _, f := range fs.Added {
+		for _, f := range folders {
 			if f.Type != eas.FolderTypeNotes && f.Type != eas.FolderTypeUserNotes {
 				continue
 			}

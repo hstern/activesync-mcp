@@ -22,6 +22,23 @@ type StateProvider interface {
 	AccountState(account string) eas.StateStore
 }
 
+// FolderCacheProvider exposes per-account folder caches. Tool handlers
+// that fetch folder lists merge each FolderSync delta into the cache
+// and serve subsequent reads from it. Optional: a manager built
+// without a cache provider (e.g. unit-test mode) falls back to
+// returning Added straight from FolderSync, which is fine when each
+// test injects a mock that always replies in full.
+type FolderCacheProvider interface {
+	FolderCache(account string) FolderCache
+}
+
+// FolderCache is the narrow API a handler needs to read+update a
+// single account's cached folder list. It mirrors store.FolderCache.
+type FolderCache interface {
+	All() ([]eas.Folder, error)
+	Apply(*eas.FolderSyncResult) error
+}
+
 // SecretResolver matches *config.SecretResolver and lets tests inject
 // a fake password lookup.
 type SecretResolver interface {
@@ -37,6 +54,7 @@ type SecretResolver interface {
 type Manager struct {
 	cfg       *config.Config
 	store     StateProvider
+	folders   FolderCacheProvider // optional; nil → no caching, return raw FolderSync deltas
 	resolver  SecretResolver
 	httpFor   func(a *config.Account) *http.Client
 	deviceIDs DeviceIDProvider
@@ -92,6 +110,47 @@ func NewManager(cfg *config.Config, store StateProvider, resolver SecretResolver
 		httpFor:   defaultHTTPClient,
 		clients:   make(map[string]*managedClient),
 	}
+}
+
+// SetFolderCache attaches a FolderCacheProvider so the *_list_folders
+// tools can cache the folder hierarchy across calls. Without this,
+// FolderSync's incremental semantics mean the second call returns
+// nothing (the SyncKey advanced past the initial Add deltas). Wired
+// in production by runServe; tests typically leave it nil and rely on
+// their easmock returning the full list every call.
+func (m *Manager) SetFolderCache(p FolderCacheProvider) {
+	m.folders = p
+}
+
+// SyncFolderList runs FolderSync for the account, applies any delta
+// to the per-account folder cache (if one is wired), and returns the
+// cumulative folder list. Without a cache the result is just the
+// raw FolderSync delta — sufficient for the unit-test path where the
+// mock always returns the whole hierarchy in Added.
+//
+// Every *_list_folders handler should call this rather than
+// c.FolderSync directly: it's the seam that makes "what folders do
+// I have?" stay correct across multiple invocations.
+func (m *Manager) SyncFolderList(ctx context.Context, accountName string) ([]eas.Folder, error) {
+	c, err := m.Client(ctx, accountName)
+	if err != nil {
+		return nil, err
+	}
+	fs, err := c.FolderSync(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("FolderSync: %w", err)
+	}
+	if m.folders == nil {
+		// No cache wired (tests, or a stripped-down build). Surface
+		// the delta as-is; mocks typically return everything in
+		// Added so this still works for unit tests.
+		return fs.Added, nil
+	}
+	cache := m.folders.FolderCache(accountName)
+	if err := cache.Apply(fs); err != nil {
+		return nil, fmt.Errorf("folder cache apply: %w", err)
+	}
+	return cache.All()
 }
 
 // NewDefaultManager wires the production-default Manager: the supplied

@@ -107,6 +107,9 @@ func runServe(argv []string, configPath *string, stderr *os.File) int {
 		fmt.Fprintf(stderr, "activesync-mcp: %v\n", err)
 		return exitConfig
 	}
+	// Wire the persistent folder cache so *_list_folders tools
+	// return the cumulative hierarchy instead of FolderSync deltas.
+	mgr.SetFolderCache(folderCacheAdapter{db: db})
 	// Pre-warm any accounts marked discovery_required=true. If
 	// autodiscover is going to fail for one of them, fail the whole
 	// serve here rather than silently degrading at first tool call.
@@ -125,6 +128,17 @@ func runServe(argv []string, configPath *string, stderr *os.File) int {
 		return exitRuntime
 	}
 	return exitOK
+}
+
+// folderCacheAdapter wraps *store.DB so it satisfies
+// server.FolderCacheProvider. The wrap is necessary because
+// (*store.DB).FolderCache returns the concrete *store.FolderCache
+// while the manager's interface wants server.FolderCache; without
+// the adapter Go's invariance on return types refuses the assignment.
+type folderCacheAdapter struct{ db *store.DB }
+
+func (a folderCacheAdapter) FolderCache(account string) server.FolderCache {
+	return a.db.FolderCache(account)
 }
 
 // hostnameSeed returns a per-installation seed string for device-id

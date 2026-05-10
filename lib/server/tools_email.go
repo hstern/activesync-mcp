@@ -63,16 +63,12 @@ func registerEmailListFolders(s *mcp.Server, m *Manager, accounts []string) {
 	scopeEnum(tool, "account", accounts)
 
 	mcp.AddTool(s, tool, func(ctx context.Context, _ *mcp.CallToolRequest, in EmailListFoldersInput) (*mcp.CallToolResult, EmailListFoldersOutput, error) {
-		c, err := m.Client(ctx, in.Account)
+		folders, err := m.SyncFolderList(ctx, in.Account)
 		if err != nil {
 			return nil, EmailListFoldersOutput{}, err
 		}
-		fs, err := c.FolderSync(ctx)
-		if err != nil {
-			return nil, EmailListFoldersOutput{}, fmt.Errorf("FolderSync: %w", err)
-		}
 		out := EmailListFoldersOutput{}
-		for _, f := range fs.Added {
+		for _, f := range folders {
 			if !isMailFolder(f.Type) {
 				continue
 			}

@@ -60,16 +60,12 @@ func registerCalendarListFolders(s *mcp.Server, m *Manager, accounts []string) {
 	}
 	scopeEnum(tool, "account", accounts)
 	mcp.AddTool(s, tool, func(ctx context.Context, _ *mcp.CallToolRequest, in CalendarListFoldersInput) (*mcp.CallToolResult, CalendarListFoldersOutput, error) {
-		c, err := m.Client(ctx, in.Account)
+		folders, err := m.SyncFolderList(ctx, in.Account)
 		if err != nil {
 			return nil, CalendarListFoldersOutput{}, err
 		}
-		fs, err := c.FolderSync(ctx)
-		if err != nil {
-			return nil, CalendarListFoldersOutput{}, fmt.Errorf("FolderSync: %w", err)
-		}
 		out := CalendarListFoldersOutput{}
-		for _, f := range fs.Added {
+		for _, f := range folders {
 			if !isCalendarFolder(f.Type) {
 				continue
 			}

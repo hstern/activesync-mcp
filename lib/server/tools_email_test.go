@@ -58,6 +58,123 @@ func TestEmailListFolders_filtersToMail(t *testing.T) {
 	}
 }
 
+// memFolderCache is a tiny FolderCacheProvider for tests that want to
+// verify the cache path. Keeps everything in a per-account map; no
+// persistence.
+type memFolderCache struct {
+	byAcct map[string]map[string]eas.Folder
+}
+
+func (m *memFolderCache) FolderCache(account string) FolderCache {
+	if m.byAcct == nil {
+		m.byAcct = map[string]map[string]eas.Folder{}
+	}
+	if m.byAcct[account] == nil {
+		m.byAcct[account] = map[string]eas.Folder{}
+	}
+	return &memFolderCacheView{store: m.byAcct[account]}
+}
+
+type memFolderCacheView struct{ store map[string]eas.Folder }
+
+func (v *memFolderCacheView) All() ([]eas.Folder, error) {
+	out := make([]eas.Folder, 0, len(v.store))
+	for _, f := range v.store {
+		out = append(out, f)
+	}
+	return out, nil
+}
+
+func (v *memFolderCacheView) Apply(fs *eas.FolderSyncResult) error {
+	if fs == nil {
+		return nil
+	}
+	for _, f := range fs.Added {
+		v.store[f.ServerID] = f
+	}
+	for _, f := range fs.Updated {
+		v.store[f.ServerID] = f
+	}
+	for _, id := range fs.Deleted {
+		delete(v.store, id)
+	}
+	return nil
+}
+
+// TestEmailListFolders_secondCallStillReturnsCached pins the bug fix:
+// FolderSync is incremental, so the second call returns an empty
+// delta. With a wired FolderCache, email_list_folders must still
+// surface the cumulative list — not {"folders": null}.
+func TestEmailListFolders_secondCallStillReturnsCached(t *testing.T) {
+	calls := 0
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			FolderSyncFunc: func(context.Context) (*eas.FolderSyncResult, error) {
+				calls++
+				if calls == 1 {
+					// First call: server returns the whole hierarchy.
+					return folderSyncFolders, nil
+				}
+				// Subsequent calls: empty delta (nothing changed).
+				return &eas.FolderSyncResult{SyncKey: "FS-2"}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	m.SetFolderCache(&memFolderCache{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+
+	// First call: populates the cache.
+	first := callTool(t, s, "email_list_folders", EmailListFoldersInput{Account: "alpha"})
+	if got, _ := first["folders"].([]any); len(got) != 2 {
+		t.Fatalf("first call: want 2 folders, got %v", first["folders"])
+	}
+
+	// Second call: empty delta. Without the cache fix this returned
+	// {"folders": null}; with the cache it returns the cumulative list.
+	second := callTool(t, s, "email_list_folders", EmailListFoldersInput{Account: "alpha"})
+	got, ok := second["folders"].([]any)
+	if !ok {
+		t.Fatalf("regression: second call returned non-list (folders=%v)", second["folders"])
+	}
+	if len(got) != 2 {
+		t.Errorf("second call: want 2 folders from cache, got %d (%v)", len(got), got)
+	}
+}
+
+// TestEmailListFolders_appliesDelete confirms the cache path drops
+// folders the server reports as deleted.
+func TestEmailListFolders_appliesDelete(t *testing.T) {
+	calls := 0
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			FolderSyncFunc: func(context.Context) (*eas.FolderSyncResult, error) {
+				calls++
+				if calls == 1 {
+					return folderSyncFolders, nil
+				}
+				// Second call: server says the project folder was removed.
+				return &eas.FolderSyncResult{
+					SyncKey: "FS-2",
+					Deleted: []string{"project-id"},
+				}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	m.SetFolderCache(&memFolderCache{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+
+	callTool(t, s, "email_list_folders", EmailListFoldersInput{Account: "alpha"})
+	second := callTool(t, s, "email_list_folders", EmailListFoldersInput{Account: "alpha"})
+	got := second["folders"].([]any)
+	if len(got) != 1 {
+		t.Errorf("after delete delta: want 1 folder, got %d (%v)", len(got), got)
+	}
+}
+
 func TestEmailList_returnsItem(t *testing.T) {
 	mock := &easmock.Client{
 		EmailClient: easmock.EmailClient{

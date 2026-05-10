@@ -29,6 +29,41 @@ func TestE2E_EmailListFolders(t *testing.T) {
 	}
 }
 
+// TestE2E_EmailListFolders_repeatedCallReturnsSameList pins the bug
+// where the second list_folders call against a persistent state.db
+// returned {"folders": null}: FolderSync is incremental (the second
+// call returns only deltas), and our handler used to return Added
+// directly. The folder cache fixes this — both calls must return
+// the same set.
+//
+// Each e2e test gets a fresh state.db, so it took TWO calls in the
+// SAME test process to expose the regression.
+func TestE2E_EmailListFolders_repeatedCallReturnsSameList(t *testing.T) {
+	cs := e2eClient(t)
+	var first, second server.EmailListFoldersOutput
+	callTool(t, cs, "email_list_folders",
+		server.EmailListFoldersInput{Account: "test"}, &first)
+	callTool(t, cs, "email_list_folders",
+		server.EmailListFoldersInput{Account: "test"}, &second)
+
+	if len(first.Folders) == 0 {
+		t.Fatalf("first call returned no folders: %+v", first)
+	}
+	if len(first.Folders) != len(second.Folders) {
+		t.Errorf("repeated list_folders mismatch: first=%d second=%d",
+			len(first.Folders), len(second.Folders))
+	}
+	firstIDs := map[string]bool{}
+	for _, f := range first.Folders {
+		firstIDs[f.ID] = true
+	}
+	for _, f := range second.Folders {
+		if !firstIDs[f.ID] {
+			t.Errorf("second call has folder id %q (%s) not in first call", f.ID, f.DisplayName)
+		}
+	}
+}
+
 func TestE2E_EmailList(t *testing.T) {
 	cs := e2eClient(t)
 	inbox := findInboxID(t, cs)

@@ -6,6 +6,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -22,9 +23,17 @@ import (
 //
 //	policykey   -> { account => key }
 //	synckey     -> { account => bucket of { folderID => key } }
+//	folders     -> { account => bucket of { folderID => json(eas.Folder) } }
+//
+// The folders bucket caches the cumulative folder hierarchy each
+// account has seen via FolderSync. It exists because the EAS
+// FolderSync command returns *deltas* since the persisted SyncKey;
+// MCP tools that want "the current folder list" need a place to
+// accumulate those deltas across calls. See FolderCache.Apply.
 const (
 	bucketPolicyKey = "policykey"
 	bucketSyncKey   = "synckey"
+	bucketFolders   = "folders"
 )
 
 // DB wraps a single bbolt database serving all configured accounts.
@@ -50,7 +59,7 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
 	if err := bdb.Update(func(tx *bbolt.Tx) error {
-		for _, name := range []string{bucketPolicyKey, bucketSyncKey} {
+		for _, name := range []string{bucketPolicyKey, bucketSyncKey, bucketFolders} {
 			if _, err := tx.CreateBucketIfNotExists([]byte(name)); err != nil {
 				return err
 			}
@@ -158,14 +167,104 @@ func (d *DB) ResetAccount(account string) error {
 				return err
 			}
 		}
-		if b := tx.Bucket([]byte(bucketSyncKey)); b != nil {
-			if sub := b.Bucket([]byte(account)); sub != nil {
-				if err := b.DeleteBucket([]byte(account)); err != nil {
-					return err
+		for _, name := range []string{bucketSyncKey, bucketFolders} {
+			if b := tx.Bucket([]byte(name)); b != nil {
+				if sub := b.Bucket([]byte(account)); sub != nil {
+					if err := b.DeleteBucket([]byte(account)); err != nil {
+						return err
+					}
+					_ = sub
 				}
-				_ = sub
 			}
 		}
 		return nil
 	})
+}
+
+// FolderCache returns the per-account folder-list cache scoped to the
+// given account name. The cache is the durable mirror of every
+// FolderSync delta this account has applied.
+func (d *DB) FolderCache(account string) *FolderCache {
+	return &FolderCache{db: d.db, account: []byte(account)}
+}
+
+// FolderCache is the per-account view of cached folder records.
+// See store.bbolt's package doc for the bucket layout.
+type FolderCache struct {
+	db      *bbolt.DB
+	account []byte
+}
+
+// All returns every cached folder for the account, in arbitrary order.
+// On a fresh account (or after ResetAccount) this is empty until the
+// first Apply.
+func (f *FolderCache) All() ([]eas.Folder, error) {
+	var out []eas.Folder
+	err := f.db.View(func(tx *bbolt.Tx) error {
+		root := tx.Bucket([]byte(bucketFolders))
+		if root == nil {
+			return nil
+		}
+		acct := root.Bucket(f.account)
+		if acct == nil {
+			return nil
+		}
+		return acct.ForEach(func(_, v []byte) error {
+			var fld eas.Folder
+			if err := json.Unmarshal(v, &fld); err != nil {
+				return fmt.Errorf("folder cache: decode: %w", err)
+			}
+			out = append(out, fld)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: FolderCache.All: %w", err)
+	}
+	return out, nil
+}
+
+// Apply folds a FolderSync delta into the cache: Added and Updated
+// folders are inserted/replaced; Deleted server IDs are removed. A
+// fresh-start sync (the server returned the entire hierarchy in
+// Added because the persisted SyncKey was "0") is just a sequence of
+// inserts — no special-casing needed.
+func (f *FolderCache) Apply(fs *eas.FolderSyncResult) error {
+	if fs == nil {
+		return nil
+	}
+	return f.db.Update(func(tx *bbolt.Tx) error {
+		root := tx.Bucket([]byte(bucketFolders))
+		if root == nil {
+			return errors.New("folder cache: missing root bucket")
+		}
+		acct, err := root.CreateBucketIfNotExists(f.account)
+		if err != nil {
+			return err
+		}
+		for _, fld := range fs.Added {
+			if err := putFolder(acct, fld); err != nil {
+				return err
+			}
+		}
+		for _, fld := range fs.Updated {
+			if err := putFolder(acct, fld); err != nil {
+				return err
+			}
+		}
+		for _, id := range fs.Deleted {
+			if err := acct.Delete([]byte(id)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func putFolder(b *bbolt.Bucket, fld eas.Folder) error {
+	body, err := json.Marshal(fld)
+	if err != nil {
+		return fmt.Errorf("folder cache: encode: %w", err)
+	}
+	return b.Put([]byte(fld.ServerID), body)
 }

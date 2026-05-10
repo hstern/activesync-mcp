@@ -238,11 +238,19 @@ func TestScenario_OOFCycle(t *testing.T) {
 
 // TestScenario_FolderHierarchyChange: prime FolderSync, create a
 // folder, then poll for the new folder to surface in subsequent
-// FolderSync deltas. Validates that the FolderSync key correctly
-// advances and reflects mid-session hierarchy changes — the chain a
-// folder-management UI takes after a "create new folder" action.
+// list_folders calls. Validates that mid-session hierarchy changes
+// reflect in the cached folder list — the chain a folder-management
+// UI takes after a "create new folder" action.
 //
-// Cleanup folder_delete is best-effort: Z-Push BackendCombined
+// History: an earlier version of this test interpreted empty-second-
+// delta results as a Z-Push BackendIMAP quirk and t.Logf'd through
+// it. The actual root cause was on our side: the *_list_folders
+// handlers returned fs.Added directly, which is empty on the second
+// FolderSync call. Fixed by caching the cumulative list in bbolt
+// (lib/store FolderCache); now the second call returns whatever the
+// server has reported plus everything the cache already knew about.
+//
+// Cleanup folder_delete is still best-effort: Z-Push BackendCombined
 // returns HTTP 500 on FolderDelete for caller-created top-level
 // folders (testenv Dovecot ACL surface, hstern/go-activesync#3).
 func TestScenario_FolderHierarchyChange(t *testing.T) {
@@ -279,7 +287,7 @@ func TestScenario_FolderHierarchyChange(t *testing.T) {
 		}
 		time.Sleep(1 * time.Second)
 	}
-	t.Logf("new folder %q didn't surface via FolderSync within 20s — Z-Push BackendIMAP doesn't echo caller-created folders through subsequent FolderSync deltas in the same device session (hstern/go-activesync#3)",
+	t.Errorf("new folder %q never surfaced in email_list_folders within 20s",
 		name)
 }
 
