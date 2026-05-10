@@ -84,10 +84,16 @@ func tempStdio(t *testing.T) (*os.File, *os.File, func() (string, string)) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Close before t.TempDir's cleanup runs. Cleanups are LIFO, so
+	// registering this AFTER os.CreateTemp ensures it runs BEFORE the
+	// temp-dir removal — which Windows refuses while a file inside it
+	// is still open.
+	t.Cleanup(func() { _ = out.Close() })
 	errF, err := os.CreateTemp(t.TempDir(), "stderr")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = errF.Close() })
 	read := func() (string, string) {
 		if _, err := out.Seek(0, 0); err != nil {
 			t.Fatal(err)
