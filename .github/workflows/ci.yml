@@ -266,7 +266,7 @@ jobs:
           # - go, base-devel, ca-certificates: build/test toolchain
           pacman -Sy --noconfirm --needed \
             kwallet dbus libsecret \
-            xorg-server-xvfb openbox xdotool nettle \
+            xorg-server-xvfb openbox xdotool nettle imagemagick \
             git go base-devel ca-certificates
 
       - uses: actions/checkout@v6
@@ -335,11 +335,14 @@ jobs:
             sleep 0.5
           done
 
+          mkdir -p /tmp/screenshots
+
           # Trigger wallet creation by storing a probe secret.
           # secret-tool blocks until the wizard is dismissed; we
-          # background it and drive the dialog from the foreground.
+          # background it under timeout(1) so the bootstrap step
+          # can never wait forever on a stuck dialog.
           (
-            secret-tool store --label=bootstrap-probe svc bootstrap <<<probe \
+            timeout 60 secret-tool store --label=bootstrap-probe svc bootstrap <<<probe \
               >/tmp/secrettool.log 2>&1
             echo "secret-tool exit=$?" >>/tmp/secrettool.log
           ) &
@@ -354,8 +357,10 @@ jobs:
           if [ -z "$WIN" ]; then
             echo "::error::wallet wizard never appeared"
             cat /tmp/ksecretd.log
+            import -window root /tmp/screenshots/01-no-window.png || true
             exit 1
           fi
+          import -window root /tmp/screenshots/01-wizard-page1.png || true
 
           # Page 1: encryption-type wizard.
           # Click "Classic, blowfish encrypted file" radio (≈380,306).
@@ -363,24 +368,31 @@ jobs:
           sleep 0.3
           xdotool mousemove 380 306 click 1
           sleep 0.5
+          import -window root /tmp/screenshots/02-after-radio.png || true
           # Click Finish (≈614, 501). With Blowfish chosen, the wizard
           # collapses to a single Finish button.
           xdotool mousemove 614 501 click 1
           sleep 1.5
+          import -window root /tmp/screenshots/03-after-finish.png || true
           # Page 2: password dialog. Both fields default to empty;
           # Blowfish allows that. Click OK (≈511, 440).
           xdotool mousemove 511 440 click 1
           sleep 1
+          import -window root /tmp/screenshots/04-after-ok.png || true
           # Page 3: low-strength confirmation. Click Yes (≈614, 378).
           xdotool mousemove 614 378 click 1
+          sleep 2
+          import -window root /tmp/screenshots/05-after-yes.png || true
 
-          # Wait for secret-tool to complete.
+          # Wait for secret-tool to complete (capped at 60s by
+          # the inner `timeout 60` above).
           wait "$ST" || true
+          import -window root /tmp/screenshots/06-final.png || true
 
           echo "--- secret-tool log ---"
           cat /tmp/secrettool.log
           echo "--- wallet files ---"
-          ls -la /root/.local/share/kwalletd/
+          ls -la /root/.local/share/kwalletd/ || true
           echo "--- collections ---"
           dbus-send --session --print-reply --dest=org.freedesktop.secrets \
             /org/freedesktop/secrets \
@@ -392,9 +404,14 @@ jobs:
             org.freedesktop.Secret.Service.ReadAlias string:default | tail -3
 
           # Sanity: a roundtrip secret-tool call must now work
-          # without any UI (wallet exists + unlocked).
-          secret-tool store --label=sanity svc sanity <<<sanity-value
-          got=$(secret-tool lookup svc sanity)
+          # without any UI (wallet exists + unlocked). If THIS
+          # times out, the wizard automation didn't actually
+          # create the wallet — the screenshots will show why.
+          if ! timeout 15 secret-tool store --label=sanity svc sanity <<<sanity-value; then
+            echo "::error::sanity store timed out — wallet creation failed"
+            exit 1
+          fi
+          got=$(timeout 15 secret-tool lookup svc sanity)
           if [ "$got" != "sanity-value" ]; then
             echo "::error::sanity roundtrip failed: got=$got"
             exit 1
@@ -402,6 +419,14 @@ jobs:
           secret-tool clear svc sanity
           echo "sanity roundtrip ok"
         timeout-minutes: 3
+
+      - name: upload kwallet bootstrap screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: kwallet-bootstrap-screenshots
+          path: /tmp/screenshots/
+          if-no-files-found: warn
 
       - name: install gotestsum
         run: go install gotest.tools/gotestsum@latest
