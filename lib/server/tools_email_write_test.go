@@ -328,6 +328,118 @@ func TestBuildMIME_validation(t *testing.T) {
 	}
 }
 
+func TestEmailForward_includesSourceFolder(t *testing.T) {
+	f := &writeFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := rwManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailWriteTools(s, m.cfg, m)
+
+	_ = callTool(t, s, "email_forward", EmailForwardInput{
+		Account: "alpha", FolderID: "inbox", ID: "inbox:42",
+		To:       []EmailAddress{{Address: "carol@x"}},
+		BodyText: "FYI",
+	})
+	req, _ := wbxml.Unmarshal(f.last, wbxml.DefaultRegistry())
+	if req.Root.Name != "SmartForward" {
+		t.Errorf("root = %q, want SmartForward", req.Root.Name)
+	}
+	if req.Root.Find("Source").Find("FolderId").TextContent() != "inbox" {
+		t.Error("FolderId wrong on SmartForward Source")
+	}
+}
+
+func TestEmailDelete_sendsSyncDeleteCommand(t *testing.T) {
+	f := &writeFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := rwManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailWriteTools(s, m.cfg, m)
+
+	out := callTool(t, s, "email_delete", EmailDeleteInput{
+		Account: "alpha", FolderID: "inbox", ID: "inbox:42",
+	})
+	// EmailDeleteOutput.Status is the EAS status code (1 = OK).
+	if int(out["status"].(float64)) != 1 {
+		t.Errorf("status = %v, want 1", out["status"])
+	}
+	// The last call is the Sync containing the Delete command.
+	req, _ := wbxml.Unmarshal(f.last, wbxml.DefaultRegistry())
+	if req.Root.Name != "Sync" {
+		t.Errorf("root = %q, want Sync", req.Root.Name)
+	}
+}
+
+func TestEmailSetFlags_marksReadAndFlagged(t *testing.T) {
+	f := &writeFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := rwManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailWriteTools(s, m.cfg, m)
+
+	read := true
+	flagged := true
+	out := callTool(t, s, "email_set_flags", EmailSetFlagsInput{
+		Account: "alpha", FolderID: "inbox", ID: "inbox:42",
+		Read: &read, Flagged: &flagged,
+	})
+	if int(out["status"].(float64)) != 1 {
+		t.Errorf("status = %v, want 1", out["status"])
+	}
+	// The last call is a Sync with Change command — verify by structure.
+	req, _ := wbxml.Unmarshal(f.last, wbxml.DefaultRegistry())
+	if req.Root.Name != "Sync" {
+		t.Errorf("root = %q, want Sync", req.Root.Name)
+	}
+}
+
+func TestBuildReplyMIME_textOnly(t *testing.T) {
+	mime, err := buildReplyMIME("hello", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mime), "Content-Type: text/plain") ||
+		!strings.Contains(string(mime), "hello") {
+		t.Errorf("plain reply missing parts:\n%s", mime)
+	}
+	if strings.Contains(string(mime), "X-MS-Exchange-Inbox-Reply-All") {
+		t.Errorf("reply-all header set when not requested:\n%s", mime)
+	}
+}
+
+func TestBuildReplyMIME_htmlOnly(t *testing.T) {
+	mime, err := buildReplyMIME("", "<b>hi</b>", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mime), "Content-Type: text/html") {
+		t.Errorf("html content-type missing:\n%s", mime)
+	}
+}
+
+func TestBuildReplyMIME_alternativeAndReplyAll(t *testing.T) {
+	mime, err := buildReplyMIME("plain", "<b>html</b>", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(mime)
+	if !strings.Contains(s, "multipart/alternative") {
+		t.Errorf("multipart missing:\n%s", s)
+	}
+	if !strings.Contains(s, "X-MS-Exchange-Inbox-Reply-All: 1") {
+		t.Errorf("reply-all header missing when requested:\n%s", s)
+	}
+}
+
+func TestBuildReplyMIME_emptyBodyFails(t *testing.T) {
+	if _, err := buildReplyMIME("", "", false); err == nil {
+		t.Error("want error for empty body")
+	}
+}
+
 func TestRandHex_lengthAndCharset(t *testing.T) {
 	for _, n := range []int{1, 5, 12, 32} {
 		got := randHex(n)

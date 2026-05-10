@@ -334,6 +334,315 @@ func TestPIM_GALSearch(t *testing.T) {
 	}
 }
 
+// pimCUDFakeServer handles the full Sync bootstrap + Add/Change/Delete
+// roundtrip for PIM classes. Tracks the most recent request body for
+// inspection.
+type pimCUDFakeServer struct {
+	mu        sync.Mutex
+	provCalls int
+	last      []byte
+}
+
+func (f *pimCUDFakeServer) handle(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/vnd.ms-sync.wbxml")
+	switch r.URL.Query().Get("Cmd") {
+	case "Settings":
+		body, _ := wbxml.Marshal(&wbxml.Document{
+			Root: wbxml.E(wbxml.PageSettings, "Settings",
+				wbxml.E(wbxml.PageSettings, "Status", wbxml.Text("1")),
+			),
+		}, wbxml.DefaultRegistry())
+		w.Write(body)
+	case "Provision":
+		f.mu.Lock()
+		f.provCalls++
+		call := f.provCalls
+		f.mu.Unlock()
+		key := "TKEY"
+		if call%2 == 0 {
+			key = "FKEY"
+		}
+		body, _ := wbxml.Marshal(&wbxml.Document{
+			Root: wbxml.E(wbxml.PageProvision, "Provision",
+				wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
+				wbxml.E(wbxml.PageProvision, "Policies",
+					wbxml.E(wbxml.PageProvision, "Policy",
+						wbxml.E(wbxml.PageProvision, "PolicyType", wbxml.Text("MS-EAS-Provisioning-WBXML")),
+						wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
+						wbxml.E(wbxml.PageProvision, "PolicyKey", wbxml.Text(key)),
+					),
+				),
+			),
+		}, wbxml.DefaultRegistry())
+		w.Write(body)
+	case "Sync":
+		body, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.last = body
+		f.mu.Unlock()
+		doc, err := wbxml.Unmarshal(body, wbxml.DefaultRegistry())
+		if err != nil || doc.Root == nil {
+			http.Error(w, "bad sync", 400)
+			return
+		}
+		var collID, clientID string
+		if c := doc.Root.Find("CollectionId"); c != nil {
+			collID = c.TextContent()
+		}
+		if cmds := doc.Root.Find("Commands"); cmds != nil {
+			if add := cmds.Find("Add"); add != nil {
+				if cid := add.Find("ClientId"); cid != nil {
+					clientID = cid.TextContent()
+				}
+			}
+		}
+		coll := wbxml.E(wbxml.PageAirSync, "Collection",
+			wbxml.E(wbxml.PageAirSync, "SyncKey", wbxml.Text("S+1")),
+			wbxml.E(wbxml.PageAirSync, "CollectionId", wbxml.Text(collID)),
+			wbxml.E(wbxml.PageAirSync, "Status", wbxml.Text("1")),
+		)
+		if clientID != "" {
+			coll.Children = append(coll.Children,
+				wbxml.E(wbxml.PageAirSync, "Responses",
+					wbxml.E(wbxml.PageAirSync, "Add",
+						wbxml.E(wbxml.PageAirSync, "ClientId", wbxml.Text(clientID)),
+						wbxml.E(wbxml.PageAirSync, "ServerId", wbxml.Text(collID+":new")),
+						wbxml.E(wbxml.PageAirSync, "Status", wbxml.Text("1")),
+					),
+				),
+			)
+		}
+		out, _ := wbxml.Marshal(&wbxml.Document{
+			Root: wbxml.E(wbxml.PageAirSync, "Sync",
+				wbxml.E(wbxml.PageAirSync, "Collections", coll),
+			),
+		}, wbxml.DefaultRegistry())
+		w.Write(out)
+	default:
+		http.Error(w, "unhandled "+r.URL.Query().Get("Cmd"), 400)
+	}
+}
+
+func pimCUDManager(t *testing.T, srv *httptest.Server) *Manager {
+	t.Helper()
+	cfg := &config.Config{Accounts: []config.Account{{
+		Name: "alpha", ServerURL: srv.URL, Username: "u", ASVersion: "14.1",
+		DefaultAccess: config.AccessRO,
+		Access: map[string]string{
+			"contacts": config.AccessRW,
+			"tasks":    config.AccessRW,
+			"notes":    config.AccessRW,
+		},
+		Secret: config.SecretRef{KeyringService: "x", KeyringAccount: "alpha"},
+	}}}
+	return NewManager(cfg, &fakeStateProvider{},
+		&fakeResolver{pw: map[string]string{"alpha": "p"}},
+		staticDeviceIDs{"alpha": "abc"})
+}
+
+func TestPIM_ContactsCreate(t *testing.T) {
+	f := &pimCUDFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := pimCUDManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+
+	out := callTool(t, s, "contacts_create", ContactsCreateInput{
+		Account: "alpha", FolderID: "contacts-id",
+		FirstName: "Alice", LastName: "Example", Email1: "alice@x",
+	})
+	if out["id"] != "contacts-id:new" {
+		t.Errorf("id = %v", out["id"])
+	}
+}
+
+func TestPIM_ContactsUpdate(t *testing.T) {
+	f := &pimCUDFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := pimCUDManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+
+	out := callTool(t, s, "contacts_update", ContactsUpdateInput{
+		ID: "contacts-id:1",
+		ContactsCreateInput: ContactsCreateInput{
+			Account: "alpha", FolderID: "contacts-id",
+			FirstName: "Alice", LastName: "Updated",
+		},
+	})
+	if out["id"] != "contacts-id:1" {
+		t.Errorf("id = %v", out["id"])
+	}
+}
+
+func TestPIM_ContactsDelete(t *testing.T) {
+	f := &pimCUDFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := pimCUDManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+
+	out := callTool(t, s, "contacts_delete", ContactsDeleteInput{
+		Account: "alpha", FolderID: "contacts-id", ID: "contacts-id:1",
+	})
+	if out["id"] != "contacts-id:1" {
+		t.Errorf("id = %v", out["id"])
+	}
+}
+
+func TestPIM_TasksCreate(t *testing.T) {
+	f := &pimCUDFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := pimCUDManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+
+	out := callTool(t, s, "tasks_create", TasksCreateInput{
+		Account: "alpha", FolderID: "tasks-id",
+		Subject: "Write report",
+	})
+	if out["id"] != "tasks-id:new" {
+		t.Errorf("id = %v", out["id"])
+	}
+}
+
+func TestPIM_TasksUpdate(t *testing.T) {
+	f := &pimCUDFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := pimCUDManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+
+	out := callTool(t, s, "tasks_update", TasksUpdateInput{
+		ID: "tasks-id:1",
+		TasksCreateInput: TasksCreateInput{
+			Account: "alpha", FolderID: "tasks-id", Subject: "Updated",
+		},
+	})
+	if out["id"] != "tasks-id:1" {
+		t.Errorf("id = %v", out["id"])
+	}
+}
+
+func TestPIM_TasksComplete(t *testing.T) {
+	f := &pimCUDFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := pimCUDManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+
+	out := callTool(t, s, "tasks_complete", TasksCompleteInput{
+		Account: "alpha", FolderID: "tasks-id", ID: "tasks-id:1",
+	})
+	if out["id"] != "tasks-id:1" {
+		t.Errorf("id = %v", out["id"])
+	}
+}
+
+func TestPIM_TasksDelete(t *testing.T) {
+	f := &pimCUDFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := pimCUDManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+
+	out := callTool(t, s, "tasks_delete", TasksDeleteInput{
+		Account: "alpha", FolderID: "tasks-id", ID: "tasks-id:1",
+	})
+	if out["id"] != "tasks-id:1" {
+		t.Errorf("id = %v", out["id"])
+	}
+}
+
+func TestPIM_NotesCreate(t *testing.T) {
+	f := &pimCUDFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := pimCUDManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+
+	out := callTool(t, s, "notes_create", NotesCreateInput{
+		Account: "alpha", FolderID: "notes-id",
+		Subject: "n", Body: "b",
+	})
+	if out["id"] != "notes-id:new" {
+		t.Errorf("id = %v", out["id"])
+	}
+}
+
+func TestPIM_NotesUpdate(t *testing.T) {
+	f := &pimCUDFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := pimCUDManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+
+	out := callTool(t, s, "notes_update", NotesUpdateInput{
+		ID: "notes-id:1",
+		NotesCreateInput: NotesCreateInput{
+			Account: "alpha", FolderID: "notes-id",
+			Subject: "n", Body: "b",
+		},
+	})
+	if out["id"] != "notes-id:1" {
+		t.Errorf("id = %v", out["id"])
+	}
+}
+
+func TestPIM_NotesDelete(t *testing.T) {
+	f := &pimCUDFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := pimCUDManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+
+	out := callTool(t, s, "notes_delete", NotesDeleteInput{
+		Account: "alpha", FolderID: "notes-id", ID: "notes-id:1",
+	})
+	if out["id"] != "notes-id:1" {
+		t.Errorf("id = %v", out["id"])
+	}
+}
+
+func TestPIM_GALSearch_emptyQueryRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc((&pimFakeServer{}).handle))
+	defer srv.Close()
+	m := pimManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerPIMTools(s, m.cfg, m)
+
+	ct, st := mcp.NewInMemoryTransports()
+	if _, err := s.Connect(t.Context(), st, nil); err != nil {
+		t.Fatal(err)
+	}
+	c := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	cs, err := c.Connect(t.Context(), ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name:      "gal_search",
+		Arguments: GALSearchInput{Account: "alpha", Query: ""},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("want IsError for empty query")
+	}
+}
+
 func TestPIM_RegisterPIMTools_skipsOnEmptyAccounts(t *testing.T) {
 	cfg := &config.Config{}
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)

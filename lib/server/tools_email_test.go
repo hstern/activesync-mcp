@@ -133,6 +133,34 @@ func (f *emailFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
 		w.Write(b)
 
+	case "Search":
+		mime := []byte("preview body")
+		doc := &wbxml.Document{
+			Root: wbxml.E(wbxml.PageSearch, "Search",
+				wbxml.E(wbxml.PageSearch, "Status", wbxml.Text("1")),
+				wbxml.E(wbxml.PageSearch, "Response",
+					wbxml.E(wbxml.PageSearch, "Store",
+						wbxml.E(wbxml.PageSearch, "Status", wbxml.Text("1")),
+						wbxml.E(wbxml.PageSearch, "Total", wbxml.Text("1")),
+						wbxml.E(wbxml.PageSearch, "Range", wbxml.Text("0-0")),
+						wbxml.E(wbxml.PageSearch, "Result",
+							wbxml.E(wbxml.PageSearch, "LongId", wbxml.Text("inbox-id:42")),
+							wbxml.E(wbxml.PageSearch, "Properties",
+								wbxml.E(wbxml.PageEmail, "Subject", wbxml.Text("Hi")),
+								wbxml.E(wbxml.PageEmail, "From", wbxml.Text("alice@x")),
+								wbxml.E(wbxml.PageAirSyncBase, "Body",
+									wbxml.E(wbxml.PageAirSyncBase, "Type", wbxml.Text("1")),
+									wbxml.E(wbxml.PageAirSyncBase, "Data", wbxml.Text(string(mime))),
+								),
+							),
+						),
+					),
+				),
+			),
+		}
+		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
+		w.Write(b)
+
 	case "ItemOperations":
 		mime := []byte("From: alice@x\r\nTo: henry@x\r\nSubject: Hi\r\n\r\nFull message body")
 		doc := &wbxml.Document{
@@ -297,6 +325,31 @@ func TestEmailGet_returnsMIME(t *testing.T) {
 	mime, _ := out["body_mime"].(string)
 	if !strings.Contains(mime, "Full message body") {
 		t.Errorf("body_mime missing marker:\n%s", mime)
+	}
+}
+
+func TestEmailSearch_returnsHits(t *testing.T) {
+	f := &emailFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+	m := newEmailTestManager(t, srv)
+
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+
+	out := callTool(t, s, "email_search", EmailSearchInput{
+		Account: "alpha", Query: "Hi", Limit: 5,
+	})
+	if int(out["total"].(float64)) != 1 {
+		t.Errorf("total = %v, want 1", out["total"])
+	}
+	items := out["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("len(items) = %d", len(items))
+	}
+	first := items[0].(map[string]any)
+	if first["subject"] != "Hi" || first["id"] != "inbox-id:42" {
+		t.Errorf("first = %v", first)
 	}
 }
 

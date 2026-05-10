@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"activesync-mcp/lib/config"
+
 	"github.com/hstern/go-activesync/eas"
 	"github.com/hstern/go-activesync/wbxml"
 )
@@ -224,5 +225,119 @@ func TestStaticDeviceIDs(t *testing.T) {
 	}
 	if _, err := s.DeviceID("missing"); err == nil {
 		t.Error("missing should error")
+	}
+}
+
+func TestNewGeneratedDeviceIDs_emptySeedGeneratesRandom(t *testing.T) {
+	d, err := newGeneratedDeviceIDs("")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	id, err := d.DeviceID("alpha")
+	if err != nil || len(id) != 32 {
+		t.Errorf("id=%q err=%v (want 32-char id)", id, err)
+	}
+	// A second instance should produce a different ID (different seed).
+	d2, err := newGeneratedDeviceIDs("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, _ := d2.DeviceID("alpha")
+	if id == id2 {
+		t.Error("two empty-seed instances produced identical IDs (random source not used)")
+	}
+}
+
+func TestNewDefaultManager(t *testing.T) {
+	cfg := &config.Config{}
+	m, err := NewDefaultManager(cfg, &fakeStateProvider{}, "0123456789abcdef")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if m == nil {
+		t.Fatal("nil manager")
+	}
+	// Bad seed (too short) should error out.
+	if _, err := NewDefaultManager(cfg, &fakeStateProvider{}, "ab"); err == nil {
+		t.Error("short seed should propagate")
+	}
+}
+
+func TestDefaultHTTPClient_returnsDefaultWhenNoCustomization(t *testing.T) {
+	a := &config.Account{Username: "u"}
+	c := defaultHTTPClient(a)
+	if c != http.DefaultClient {
+		t.Errorf("expected http.DefaultClient when no TLS/proxy, got %p", c)
+	}
+}
+
+func TestDefaultHTTPClient_badProxyURL(t *testing.T) {
+	a := &config.Account{Username: "u", ProxyURL: "://bad-url"}
+	c := defaultHTTPClient(a)
+	if c == nil {
+		t.Fatal("nil client")
+	}
+	// Doing any RoundTrip should surface the parse error via failTransport.
+	_, err := c.Transport.RoundTrip(&http.Request{})
+	if err == nil || !strings.Contains(err.Error(), "proxy_url") {
+		t.Errorf("err = %v; want one mentioning proxy_url", err)
+	}
+}
+
+func TestDefaultHTTPClient_proxyURL(t *testing.T) {
+	a := &config.Account{Username: "u", ProxyURL: "http://proxy.example:3128"}
+	c := defaultHTTPClient(a)
+	if c == nil || c.Transport == nil {
+		t.Fatal("nil client/transport")
+	}
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", c.Transport)
+	}
+	if tr.Proxy == nil {
+		t.Error("Proxy should be set")
+	}
+}
+
+func TestRuntimeOSLabel_format(t *testing.T) {
+	got := runtimeOSLabel()
+	if !strings.Contains(got, "/") {
+		t.Errorf("runtimeOSLabel() = %q; want OS/arch with slash", got)
+	}
+}
+
+func TestCoalesce(t *testing.T) {
+	if got := coalesce("a", "b"); got != "a" {
+		t.Errorf("coalesce non-empty: %q", got)
+	}
+	if got := coalesce("", "fallback"); got != "fallback" {
+		t.Errorf("coalesce empty: %q", got)
+	}
+	if got := coalesce("", ""); got != "" {
+		t.Errorf("coalesce both empty: %q", got)
+	}
+}
+
+func TestDeviceInfoFor_usesAccountFields(t *testing.T) {
+	a := &config.Account{
+		Name:       "alpha",
+		Username:   "u",
+		DeviceType: "MyDevice",
+		UserAgent:  "Custom/1.0",
+	}
+	info := deviceInfoFor(a)
+	if info.Model != "MyDevice" {
+		t.Errorf("Model = %q, want MyDevice", info.Model)
+	}
+	if info.UserAgent != "Custom/1.0" {
+		t.Errorf("UserAgent = %q, want Custom/1.0", info.UserAgent)
+	}
+	if !strings.Contains(info.FriendlyName, "alpha") {
+		t.Errorf("FriendlyName should include account name, got %q", info.FriendlyName)
+	}
+	// With empty fields, defaults kick in.
+	info2 := deviceInfoFor(&config.Account{})
+	if info2.Model == "" || info2.UserAgent == "" {
+		t.Errorf("defaults should populate Model+UserAgent: %+v", info2)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"activesync-mcp/lib/config"
+	"github.com/hstern/go-activesync/eas"
 	"github.com/hstern/go-activesync/wbxml"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -228,6 +229,85 @@ func TestOofGetTool(t *testing.T) {
 	}
 }
 
+func TestOofSetTool_success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc((&extrasFakeServer{}).handle))
+	defer srv.Close()
+	m := extrasManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+
+	out := callTool(t, s, "oof_set", OofSetInput{
+		Account:       "alpha",
+		State:         "global",
+		InternalReply: "I am away",
+	})
+	if out["status"] != "ok" {
+		t.Errorf("status = %v", out["status"])
+	}
+}
+
+func TestOofSetTool_timeBasedRequiresStartEnd(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc((&extrasFakeServer{}).handle))
+	defer srv.Close()
+	m := extrasManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+
+	// Use the in-process transport directly to inspect IsError.
+	ct, st := mcp.NewInMemoryTransports()
+	if _, err := s.Connect(t.Context(), st, nil); err != nil {
+		t.Fatal(err)
+	}
+	c := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	cs, err := c.Connect(t.Context(), ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
+		Name: "oof_set",
+		Arguments: OofSetInput{
+			Account: "alpha", State: "time_based", // missing start/end
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("want IsError when time_based without start/end")
+	}
+}
+
+func TestFolderRenameTool_success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc((&extrasFakeServer{}).handle))
+	defer srv.Close()
+	m := extrasManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+
+	out := callTool(t, s, "folder_rename", FolderRenameInput{
+		Account: "alpha", ID: "folder-x", NewDisplayName: "renamed",
+	})
+	if out["status"] != "ok" {
+		t.Errorf("status = %v", out["status"])
+	}
+}
+
+func TestFolderDeleteTool_success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc((&extrasFakeServer{}).handle))
+	defer srv.Close()
+	m := extrasManager(t, srv)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+
+	out := callTool(t, s, "folder_delete", FolderDeleteInput{
+		Account: "alpha", ID: "folder-x",
+	})
+	if out["status"] != "deleted" {
+		t.Errorf("status = %v", out["status"])
+	}
+}
+
 func TestParseOofState(t *testing.T) {
 	for _, c := range []struct {
 		in   string
@@ -262,6 +342,58 @@ func TestFolderTypeForClass(t *testing.T) {
 		if int(got) != c.want {
 			t.Errorf("folderTypeForClass(%q) = %d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+func TestParseTimeRFC3339(t *testing.T) {
+	for _, c := range []struct {
+		in     string
+		wantOk bool
+	}{
+		{"2026-05-09T12:00:00Z", true},
+		{"2026-05-09T12:00:00-05:00", true},
+		{"", false},
+		{"not-a-time", false},
+		{"2026-13-01T00:00:00Z", false},
+	} {
+		got := parseTimeRFC3339(c.in)
+		if c.wantOk && got.IsZero() {
+			t.Errorf("parseTimeRFC3339(%q): got zero, want non-zero", c.in)
+		}
+		if !c.wantOk && !got.IsZero() {
+			t.Errorf("parseTimeRFC3339(%q): got %v, want zero", c.in, got)
+		}
+	}
+}
+
+func TestOofStateLabel(t *testing.T) {
+	for _, c := range []struct {
+		in   eas.OofState
+		want string
+	}{
+		{eas.OofGlobal, "global"},
+		{eas.OofTimeBased, "time_based"},
+		{eas.OofDisabled, "disabled"},
+		{eas.OofState(99), "disabled"}, // unknown maps to disabled
+	} {
+		if got := oofStateLabel(c.in); got != c.want {
+			t.Errorf("oofStateLabel(%v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestOofMessageRow(t *testing.T) {
+	plain := oofMessageRow(eas.OofMessage{
+		Enabled: true, ReplyMessage: "out", BodyType: eas.BodyTypePlain,
+	})
+	if plain.BodyType != "plain" || !plain.Enabled || plain.ReplyMessage != "out" {
+		t.Errorf("plain = %+v", plain)
+	}
+	html := oofMessageRow(eas.OofMessage{
+		Enabled: false, ReplyMessage: "<b>out</b>", BodyType: eas.BodyTypeHTML,
+	})
+	if html.BodyType != "html" || html.Enabled {
+		t.Errorf("html = %+v", html)
 	}
 }
 
