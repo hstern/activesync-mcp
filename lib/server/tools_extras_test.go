@@ -1,155 +1,37 @@
+// Copyright (C) 2026 Henry Stern
+// SPDX-License-Identifier: MIT
+
 package server
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"sync"
+	"context"
 	"testing"
 
 	"activesync-mcp/lib/config"
-	"github.com/hstern/go-activesync/eas"
-	"github.com/hstern/go-activesync/wbxml"
 
+	"github.com/hstern/go-activesync/eas"
+	"github.com/hstern/go-activesync/eas/easmock"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// extrasFakeServer handles Provision + Settings + the new commands
-// (GetItemEstimate, ResolveRecipients, FolderCreate, FolderUpdate,
-// FolderDelete, EmptyFolderContents, OOF Settings).
-type extrasFakeServer struct {
-	mu        sync.Mutex
-	provCalls int
-}
-
-func (f *extrasFakeServer) handle(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/vnd.ms-sync.wbxml")
-	switch r.URL.Query().Get("Cmd") {
-	case "Settings":
-		// Used by both DeviceInformation set and OOF get/set; respond
-		// with a dummy OOF document so oof_get has something to parse.
-		body, _ := wbxml.Marshal(&wbxml.Document{
-			Root: wbxml.E(wbxml.PageSettings, "Settings",
-				wbxml.E(wbxml.PageSettings, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageSettings, "Oof",
-					wbxml.E(wbxml.PageSettings, "Status", wbxml.Text("1")),
-					wbxml.E(wbxml.PageSettings, "Get",
-						wbxml.E(wbxml.PageSettings, "OofState", wbxml.Text("0")),
-					),
-				),
-			),
-		}, wbxml.DefaultRegistry())
-		w.Write(body)
-	case "Provision":
-		f.mu.Lock()
-		f.provCalls++
-		call := f.provCalls
-		f.mu.Unlock()
-		key := "TKEY"
-		if call == 2 {
-			key = "FKEY"
-		}
-		body, _ := wbxml.Marshal(&wbxml.Document{
-			Root: wbxml.E(wbxml.PageProvision, "Provision",
-				wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageProvision, "Policies",
-					wbxml.E(wbxml.PageProvision, "Policy",
-						wbxml.E(wbxml.PageProvision, "PolicyType", wbxml.Text("MS-EAS-Provisioning-WBXML")),
-						wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
-						wbxml.E(wbxml.PageProvision, "PolicyKey", wbxml.Text(key)),
-					),
-				),
-			),
-		}, wbxml.DefaultRegistry())
-		w.Write(body)
-	case "GetItemEstimate":
-		body, _ := wbxml.Marshal(&wbxml.Document{
-			Root: wbxml.E(wbxml.PageGetItemEstimate, "GetItemEstimate",
-				wbxml.E(wbxml.PageGetItemEstimate, "Response",
-					wbxml.E(wbxml.PageGetItemEstimate, "Status", wbxml.Text("1")),
-					wbxml.E(wbxml.PageGetItemEstimate, "Collection",
-						wbxml.E(wbxml.PageGetItemEstimate, "CollectionId", wbxml.Text("inbox")),
-						wbxml.E(wbxml.PageGetItemEstimate, "Class", wbxml.Text("Email")),
-						wbxml.E(wbxml.PageGetItemEstimate, "Estimate", wbxml.Text("17")),
-					),
-				),
-			),
-		}, wbxml.DefaultRegistry())
-		w.Write(body)
-	case "ResolveRecipients":
-		body, _ := wbxml.Marshal(&wbxml.Document{
-			Root: wbxml.E(wbxml.PageResolveRecipients, "ResolveRecipients",
-				wbxml.E(wbxml.PageResolveRecipients, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageResolveRecipients, "Response",
-					wbxml.E(wbxml.PageResolveRecipients, "To", wbxml.Text("alice")),
-					wbxml.E(wbxml.PageResolveRecipients, "Status", wbxml.Text("1")),
-					wbxml.E(wbxml.PageResolveRecipients, "Recipient",
-						wbxml.E(wbxml.PageResolveRecipients, "Type", wbxml.Text("1")),
-						wbxml.E(wbxml.PageResolveRecipients, "DisplayName", wbxml.Text("Alice E.")),
-						wbxml.E(wbxml.PageResolveRecipients, "EmailAddress", wbxml.Text("alice@x")),
-					),
-				),
-			),
-		}, wbxml.DefaultRegistry())
-		w.Write(body)
-	case "FolderCreate":
-		body, _ := wbxml.Marshal(&wbxml.Document{
-			Root: wbxml.E(wbxml.PageFolderHierarchy, "FolderCreate",
-				wbxml.E(wbxml.PageFolderHierarchy, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageFolderHierarchy, "SyncKey", wbxml.Text("FS+1")),
-				wbxml.E(wbxml.PageFolderHierarchy, "ServerId", wbxml.Text("new-folder")),
-			),
-		}, wbxml.DefaultRegistry())
-		w.Write(body)
-	case "FolderUpdate":
-		body, _ := wbxml.Marshal(&wbxml.Document{
-			Root: wbxml.E(wbxml.PageFolderHierarchy, "FolderUpdate",
-				wbxml.E(wbxml.PageFolderHierarchy, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageFolderHierarchy, "SyncKey", wbxml.Text("FS+2")),
-			),
-		}, wbxml.DefaultRegistry())
-		w.Write(body)
-	case "FolderDelete":
-		body, _ := wbxml.Marshal(&wbxml.Document{
-			Root: wbxml.E(wbxml.PageFolderHierarchy, "FolderDelete",
-				wbxml.E(wbxml.PageFolderHierarchy, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageFolderHierarchy, "SyncKey", wbxml.Text("FS+3")),
-			),
-		}, wbxml.DefaultRegistry())
-		w.Write(body)
-	case "ItemOperations":
-		body, _ := wbxml.Marshal(&wbxml.Document{
-			Root: wbxml.E(wbxml.PageItemOperations, "ItemOperations",
-				wbxml.E(wbxml.PageItemOperations, "Status", wbxml.Text("1")),
-			),
-		}, wbxml.DefaultRegistry())
-		w.Write(body)
-	default:
-		http.Error(w, "unhandled "+r.URL.Query().Get("Cmd"), 400)
-	}
-}
-
-func extrasManager(t *testing.T, srv *httptest.Server) *Manager {
-	t.Helper()
-	cfg := &config.Config{
-		Accounts: []config.Account{{
-			Name:          "alpha",
-			ServerURL:     srv.URL,
-			Username:      "u",
-			ASVersion:     "14.1",
-			DefaultAccess: config.AccessRW,
-			Secret:        config.SecretRef{KeyringService: "x", KeyringAccount: "alpha"},
-		}},
-	}
-	res := &fakeResolver{pw: map[string]string{"alpha": "p"}}
-	store := &fakeStateProvider{}
-	return NewManager(cfg, store, res, staticDeviceIDs{"alpha": "dev"})
+// extrasMockManager wires a Manager with AccessRW (extras tools span
+// folder CRUD + OOF set + recipient resolution; many require write).
+func extrasMockManager(t *testing.T, c eas.Client) *Manager {
+	return newMockManager(t, c, mockManagerOpts{access: config.AccessRW})
 }
 
 func TestItemCount(t *testing.T) {
-	f := &extrasFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := extrasManager(t, srv)
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			GetItemEstimateFunc: func(_ context.Context, ids []string) ([]eas.ItemEstimate, error) {
+				if len(ids) != 1 || ids[0] != "inbox" {
+					t.Errorf("ids = %v", ids)
+				}
+				return []eas.ItemEstimate{{CollectionID: "inbox", Class: "Email", Estimate: 17, Status: 1}}, nil
+			},
+		},
+	}
+	m := extrasMockManager(t, mock)
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerExtraTools(s, m.cfg, m)
 
@@ -163,10 +45,20 @@ func TestItemCount(t *testing.T) {
 }
 
 func TestResolveRecipientsTool(t *testing.T) {
-	f := &extrasFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := extrasManager(t, srv)
+	mock := &easmock.Client{
+		SearchClient: easmock.SearchClient{
+			ResolveRecipientsFunc: func(_ context.Context, recipients []string, _ eas.ResolveOptions) ([]eas.ResolveResponse, error) {
+				return []eas.ResolveResponse{{
+					To:     recipients[0],
+					Status: 1,
+					Recipients: []eas.ResolvedRecipient{
+						{Type: 1, DisplayName: "Alice E.", EmailAddress: "alice@x"},
+					},
+				}}, nil
+			},
+		},
+	}
+	m := extrasMockManager(t, mock)
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerExtraTools(s, m.cfg, m)
 
@@ -184,10 +76,17 @@ func TestResolveRecipientsTool(t *testing.T) {
 }
 
 func TestFolderCreateTool(t *testing.T) {
-	f := &extrasFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := extrasManager(t, srv)
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			FolderCreateFunc: func(_ context.Context, parentID, name string, ft eas.FolderType) (*eas.FolderCreateResult, error) {
+				if parentID != "0" || name != "Projects" {
+					t.Errorf("got parent=%q name=%q", parentID, name)
+				}
+				return &eas.FolderCreateResult{ServerID: "new-folder", SyncKey: "FS+1", Status: 1}, nil
+			},
+		},
+	}
+	m := extrasMockManager(t, mock)
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerExtraTools(s, m.cfg, m)
 
@@ -200,10 +99,17 @@ func TestFolderCreateTool(t *testing.T) {
 }
 
 func TestFolderEmptyTool(t *testing.T) {
-	f := &extrasFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := extrasManager(t, srv)
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			EmptyFolderContentsFunc: func(_ context.Context, fid string, _ bool) error {
+				if fid != "trash" {
+					t.Errorf("folder = %q", fid)
+				}
+				return nil
+			},
+		},
+	}
+	m := extrasMockManager(t, mock)
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerExtraTools(s, m.cfg, m)
 
@@ -215,11 +121,61 @@ func TestFolderEmptyTool(t *testing.T) {
 	}
 }
 
+func TestFolderRenameTool_success(t *testing.T) {
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			FolderUpdateFunc: func(_ context.Context, sid, parent, newName string) error {
+				if sid != "folder-x" || newName != "renamed" {
+					t.Errorf("got sid=%q name=%q", sid, newName)
+				}
+				return nil
+			},
+		},
+	}
+	m := extrasMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+
+	out := callTool(t, s, "folder_rename", FolderRenameInput{
+		Account: "alpha", ID: "folder-x", NewDisplayName: "renamed",
+	})
+	if out["status"] != "ok" {
+		t.Errorf("status = %v", out["status"])
+	}
+}
+
+func TestFolderDeleteTool_success(t *testing.T) {
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			FolderDeleteFunc: func(_ context.Context, sid string) error {
+				if sid != "folder-x" {
+					t.Errorf("sid = %q", sid)
+				}
+				return nil
+			},
+		},
+	}
+	m := extrasMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerExtraTools(s, m.cfg, m)
+
+	out := callTool(t, s, "folder_delete", FolderDeleteInput{
+		Account: "alpha", ID: "folder-x",
+	})
+	if out["status"] != "deleted" {
+		t.Errorf("status = %v", out["status"])
+	}
+}
+
 func TestOofGetTool(t *testing.T) {
-	f := &extrasFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := extrasManager(t, srv)
+	mock := &easmock.Client{
+		SettingsClient: easmock.SettingsClient{
+			GetOofFunc: func(context.Context) (*eas.OofConfig, error) {
+				return &eas.OofConfig{State: eas.OofDisabled}, nil
+			},
+		},
+	}
+	m := extrasMockManager(t, mock)
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerExtraTools(s, m.cfg, m)
 
@@ -230,9 +186,17 @@ func TestOofGetTool(t *testing.T) {
 }
 
 func TestOofSetTool_success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc((&extrasFakeServer{}).handle))
-	defer srv.Close()
-	m := extrasManager(t, srv)
+	mock := &easmock.Client{
+		SettingsClient: easmock.SettingsClient{
+			SetOofFunc: func(_ context.Context, cfg eas.OofConfig) error {
+				if cfg.State != eas.OofGlobal || cfg.InternalReply.ReplyMessage != "I am away" {
+					t.Errorf("cfg = %+v", cfg)
+				}
+				return nil
+			},
+		},
+	}
+	m := extrasMockManager(t, mock)
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerExtraTools(s, m.cfg, m)
 
@@ -247,13 +211,11 @@ func TestOofSetTool_success(t *testing.T) {
 }
 
 func TestOofSetTool_timeBasedRequiresStartEnd(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc((&extrasFakeServer{}).handle))
-	defer srv.Close()
-	m := extrasManager(t, srv)
+	mock := &easmock.Client{} // sentinel — should not be hit
+	m := extrasMockManager(t, mock)
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerExtraTools(s, m.cfg, m)
 
-	// Use the in-process transport directly to inspect IsError.
 	ct, st := mcp.NewInMemoryTransports()
 	if _, err := s.Connect(t.Context(), st, nil); err != nil {
 		t.Fatal(err)
@@ -278,35 +240,7 @@ func TestOofSetTool_timeBasedRequiresStartEnd(t *testing.T) {
 	}
 }
 
-func TestFolderRenameTool_success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc((&extrasFakeServer{}).handle))
-	defer srv.Close()
-	m := extrasManager(t, srv)
-	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	registerExtraTools(s, m.cfg, m)
-
-	out := callTool(t, s, "folder_rename", FolderRenameInput{
-		Account: "alpha", ID: "folder-x", NewDisplayName: "renamed",
-	})
-	if out["status"] != "ok" {
-		t.Errorf("status = %v", out["status"])
-	}
-}
-
-func TestFolderDeleteTool_success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc((&extrasFakeServer{}).handle))
-	defer srv.Close()
-	m := extrasManager(t, srv)
-	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	registerExtraTools(s, m.cfg, m)
-
-	out := callTool(t, s, "folder_delete", FolderDeleteInput{
-		Account: "alpha", ID: "folder-x",
-	})
-	if out["status"] != "deleted" {
-		t.Errorf("status = %v", out["status"])
-	}
-}
+// Pure-Go helpers — no EAS layer.
 
 func TestParseOofState(t *testing.T) {
 	for _, c := range []struct {

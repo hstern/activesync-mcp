@@ -84,6 +84,33 @@ cs, _ := c.Connect(t.Context(), ct, nil)
 res, _ := cs.CallTool(t.Context(), &mcp.CallToolParams{Name: "...", Arguments: ...})
 ```
 
+EAS layer in tier 1 tests is faked with
+[`easmock`](https://pkg.go.dev/github.com/hstern/go-activesync/eas/easmock).
+**Do not** use `httptest.Server` + WBXML fixtures in new tier-1 tool
+handler tests — the easmock pattern is shorter, faster, and exposes
+call arguments directly to assertions:
+
+```go
+mock := &easmock.Client{
+    EmailClient: easmock.EmailClient{
+        SyncEmailFunc: func(_ context.Context, fid string, _ eas.EmailSyncOptions) (*eas.EmailSyncResult, error) {
+            return &eas.EmailSyncResult{Added: []eas.EmailItem{{Subject: "hi"}}}, nil
+        },
+    },
+}
+m := newMockManager(t, mock, mockManagerOpts{})
+s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+registerEmailReadTools(s, m.cfg, m)
+out := callTool(t, s, "email_list", EmailListInput{Account: "alpha", FolderID: "inbox-id"})
+```
+
+`Manager.SetClientForTest` (defined in `lib/server/export_test.go`)
+is the seam that pre-populates the client cache so tool handlers
+never go through the real Provision path. `lib/server/easmock_helpers_test.go`
+defines `newMockManager` and the shared `callTool`. `httptest.Server`
+is still appropriate when the test specifically exercises the HTTP
+transport (e.g. NTLM/Kerberos handshakes in `auth_schemes_test.go`).
+
 Binary-spawn pattern (tier 3 + 4):
 
 ```go

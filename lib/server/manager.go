@@ -54,7 +54,7 @@ type DeviceIDProvider interface {
 
 // managedClient bundles a ready-to-use eas.Client with provisioning state.
 type managedClient struct {
-	client      *eas.Client
+	client      eas.Client
 	provisioned bool
 	provisionMu sync.Mutex
 }
@@ -111,7 +111,7 @@ func NewDefaultManager(cfg *config.Config, store StateProvider, deviceSeed strin
 // Client returns a provisioned EAS client for the named account. First
 // call performs lookup, password resolution, client construction, and
 // the Provision handshake. Subsequent calls return the cached client.
-func (m *Manager) Client(ctx context.Context, accountName string) (*eas.Client, error) {
+func (m *Manager) Client(ctx context.Context, accountName string) (eas.Client, error) {
 	a := m.cfg.FindAccount(accountName)
 	if a == nil {
 		return nil, fmt.Errorf("manager: unknown account %q", accountName)

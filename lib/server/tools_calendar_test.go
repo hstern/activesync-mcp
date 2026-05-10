@@ -1,164 +1,47 @@
+// Copyright (C) 2026 Henry Stern
+// SPDX-License-Identifier: MIT
+
 package server
 
 import (
-	"net/http"
-	"net/http/httptest"
+	"context"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"activesync-mcp/lib/config"
-	"github.com/hstern/go-activesync/eas"
-	"github.com/hstern/go-activesync/wbxml"
 
+	"github.com/hstern/go-activesync/eas"
+	"github.com/hstern/go-activesync/eas/easmock"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// calendarFakeServer responds to FolderSync (returns one calendar folder),
-// Sync (returns one event the second time it's called for that folder so
-// the bootstrap dance has data on the second pass), and MeetingResponse.
-type calendarFakeServer struct {
-	mu        sync.Mutex
-	provCalls int
-	syncCalls int
+// calendarFolders is the canned FolderSync output reused by calendar
+// tests: an Inbox (filtered out) and a Calendar.
+var calendarFolders = &eas.FolderSyncResult{
+	SyncKey: "FS",
+	Added: []eas.Folder{
+		{ServerID: "inbox-id", DisplayName: "Inbox", Type: eas.FolderTypeInbox},
+		{ServerID: "cal-id", DisplayName: "Calendar", Type: eas.FolderTypeCalendar},
+	},
 }
 
-func (f *calendarFakeServer) handle(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/vnd.ms-sync.wbxml")
-	switch r.URL.Query().Get("Cmd") {
-	case "Settings":
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageSettings, "Settings",
-				wbxml.E(wbxml.PageSettings, "Status", wbxml.Text("1")),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-	case "Provision":
-		f.mu.Lock()
-		f.provCalls++
-		call := f.provCalls
-		f.mu.Unlock()
-		key := "TKEY"
-		if call == 2 {
-			key = "FKEY"
-		}
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageProvision, "Provision",
-				wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageProvision, "Policies",
-					wbxml.E(wbxml.PageProvision, "Policy",
-						wbxml.E(wbxml.PageProvision, "PolicyType", wbxml.Text("MS-EAS-Provisioning-WBXML")),
-						wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
-						wbxml.E(wbxml.PageProvision, "PolicyKey", wbxml.Text(key)),
-					),
-				),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-	case "FolderSync":
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageFolderHierarchy, "FolderSync",
-				wbxml.E(wbxml.PageFolderHierarchy, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageFolderHierarchy, "SyncKey", wbxml.Text("FS")),
-				wbxml.E(wbxml.PageFolderHierarchy, "Changes",
-					wbxml.E(wbxml.PageFolderHierarchy, "Count", wbxml.Text("2")),
-					wbxml.E(wbxml.PageFolderHierarchy, "Add",
-						wbxml.E(wbxml.PageFolderHierarchy, "ServerId", wbxml.Text("inbox-id")),
-						wbxml.E(wbxml.PageFolderHierarchy, "ParentId", wbxml.Text("0")),
-						wbxml.E(wbxml.PageFolderHierarchy, "DisplayName", wbxml.Text("Inbox")),
-						wbxml.E(wbxml.PageFolderHierarchy, "Type", wbxml.Text("2")),
-					),
-					wbxml.E(wbxml.PageFolderHierarchy, "Add",
-						wbxml.E(wbxml.PageFolderHierarchy, "ServerId", wbxml.Text("cal-id")),
-						wbxml.E(wbxml.PageFolderHierarchy, "ParentId", wbxml.Text("0")),
-						wbxml.E(wbxml.PageFolderHierarchy, "DisplayName", wbxml.Text("Calendar")),
-						wbxml.E(wbxml.PageFolderHierarchy, "Type", wbxml.Text("8")),
-					),
-				),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-	case "Sync":
-		f.mu.Lock()
-		f.syncCalls++
-		call := f.syncCalls
-		f.mu.Unlock()
-		key := "C1"
-		var commands *wbxml.Element
-		if call == 2 {
-			key = "C2"
-			start := time.Date(2026, 5, 9, 14, 0, 0, 0, time.UTC)
-			commands = wbxml.E(wbxml.PageAirSync, "Commands",
-				wbxml.E(wbxml.PageAirSync, "Add",
-					wbxml.E(wbxml.PageAirSync, "ServerId", wbxml.Text("cal-id:42")),
-					wbxml.E(wbxml.PageAirSync, "ApplicationData",
-						wbxml.E(wbxml.PageCalendar, "Subject", wbxml.Text("Quarterly review")),
-						wbxml.E(wbxml.PageCalendar, "StartTime", wbxml.Text("2026-05-09T14:00:00.000Z")),
-						wbxml.E(wbxml.PageCalendar, "EndTime", wbxml.Text("2026-05-09T15:00:00.000Z")),
-						wbxml.E(wbxml.PageCalendar, "AllDayEvent", wbxml.Text("0")),
-					),
-				),
-			)
-			_ = start
-		}
-		coll := wbxml.E(wbxml.PageAirSync, "Collection",
-			wbxml.E(wbxml.PageAirSync, "SyncKey", wbxml.Text(key)),
-			wbxml.E(wbxml.PageAirSync, "CollectionId", wbxml.Text("cal-id")),
-			wbxml.E(wbxml.PageAirSync, "Status", wbxml.Text("1")),
-		)
-		if commands != nil {
-			coll.Children = append(coll.Children, commands)
-		}
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageAirSync, "Sync",
-				wbxml.E(wbxml.PageAirSync, "Collections", coll),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-	case "MeetingResponse":
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageMeetingResponse, "MeetingResponse",
-				wbxml.E(wbxml.PageMeetingResponse, "Result",
-					wbxml.E(wbxml.PageMeetingResponse, "Status", wbxml.Text("1")),
-					wbxml.E(wbxml.PageMeetingResponse, "CalendarId", wbxml.Text("cal-id:42")),
-				),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-	default:
-		http.Error(w, "unhandled "+r.URL.Query().Get("Cmd"), 400)
-	}
-}
-
-func calendarTestManager(t *testing.T, srv *httptest.Server) *Manager {
-	t.Helper()
-	cfg := &config.Config{
-		Accounts: []config.Account{{
-			Name:          "alpha",
-			ServerURL:     srv.URL,
-			Username:      "u",
-			ASVersion:     "14.1",
-			DefaultAccess: config.AccessRO,
-			Access:        map[string]string{"calendar": config.AccessRW},
-			Secret:        config.SecretRef{KeyringService: "x", KeyringAccount: "alpha"},
-		}},
-	}
-	res := &fakeResolver{pw: map[string]string{"alpha": "p"}}
-	store := &fakeStateProvider{}
-	return NewManager(cfg, store, res, staticDeviceIDs{"alpha": "abc"})
+// calendarMockManager is a Manager wired with easmock and per-class
+// access map enabling calendar writes.
+func calendarMockManager(t *testing.T, c eas.Client) *Manager {
+	return newMockManager(t, c, mockManagerOpts{
+		access:  config.AccessRO,
+		classes: map[string]string{"calendar": config.AccessRW},
+	})
 }
 
 func TestCalendarListFolders(t *testing.T) {
-	f := &calendarFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := calendarTestManager(t, srv)
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			FolderSyncFunc: func(context.Context) (*eas.FolderSyncResult, error) { return calendarFolders, nil },
+		},
+	}
+	m := calendarMockManager(t, mock)
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerCalendarTools(s, m.cfg, m)
 
@@ -173,10 +56,28 @@ func TestCalendarListFolders(t *testing.T) {
 }
 
 func TestCalendarListEvents(t *testing.T) {
-	f := &calendarFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := calendarTestManager(t, srv)
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			SyncCalendarFunc: func(_ context.Context, fid string, _ eas.CalendarSyncOptions) (*eas.CalendarSyncResult, error) {
+				if fid != "cal-id" {
+					t.Errorf("folder = %q", fid)
+				}
+				start := time.Date(2026, 5, 9, 14, 0, 0, 0, time.UTC)
+				return &eas.CalendarSyncResult{
+					SyncKey: "C2",
+					Added: []eas.EventItem{
+						{
+							ServerID:  "cal-id:42",
+							Subject:   "Quarterly review",
+							StartTime: start,
+							EndTime:   start.Add(time.Hour),
+						},
+					},
+				}, nil
+			},
+		},
+	}
+	m := calendarMockManager(t, mock)
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerCalendarTools(s, m.cfg, m)
 
@@ -187,17 +88,23 @@ func TestCalendarListEvents(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("len(events) = %d", len(events))
 	}
-	first := events[0].(map[string]any)
-	if first["subject"] != "Quarterly review" {
-		t.Errorf("subject = %v", first["subject"])
+	if events[0].(map[string]any)["subject"] != "Quarterly review" {
+		t.Errorf("subject = %v", events[0])
 	}
 }
 
 func TestCalendarRespondInvite_validation(t *testing.T) {
-	f := &calendarFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := calendarTestManager(t, srv)
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			RespondInviteFunc: func(_ context.Context, fid, sid string, _ eas.MeetingResponseChoice) (*eas.MeetingResponseResult, error) {
+				if fid != "inbox-id" || sid != "invite" {
+					t.Errorf("got fid=%q sid=%q", fid, sid)
+				}
+				return &eas.MeetingResponseResult{Status: 1, CalendarID: "cal-id:42"}, nil
+			},
+		},
+	}
+	m := calendarMockManager(t, mock)
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerCalendarTools(s, m.cfg, m)
 
@@ -229,14 +136,11 @@ func TestParseInviteResponse(t *testing.T) {
 }
 
 func TestCalendarCreate_requiresStartEnd(t *testing.T) {
-	f := &calendarFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := calendarTestManager(t, srv)
+	mock := &easmock.Client{} // no Func — sentinel fires if anything is called
+	m := calendarMockManager(t, mock)
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerCalendarTools(s, m.cfg, m)
 
-	// In-process MCP call — expect IsError because StartTime is missing.
 	ct, st := mcp.NewInMemoryTransports()
 	if _, err := s.Connect(t.Context(), st, nil); err != nil {
 		t.Fatal(err)
@@ -293,120 +197,18 @@ func TestDraftFromInput_mapsAllFields(t *testing.T) {
 	}
 }
 
-// calendarCUDFakeServer extends calendarFakeServer with full Sync
-// CRUD support: bootstrap (key=0 → "C1") plus Add/Change/Delete
-// command echoing back the right Responses shape.
-type calendarCUDFakeServer struct {
-	mu        sync.Mutex
-	provCalls int
-	syncCalls int
-}
-
-func (f *calendarCUDFakeServer) handle(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/vnd.ms-sync.wbxml")
-	cmd := r.URL.Query().Get("Cmd")
-	switch cmd {
-	case "Settings":
-		b, _ := wbxml.Marshal(&wbxml.Document{
-			Root: wbxml.E(wbxml.PageSettings, "Settings",
-				wbxml.E(wbxml.PageSettings, "Status", wbxml.Text("1")),
-			),
-		}, wbxml.DefaultRegistry())
-		w.Write(b)
-	case "Provision":
-		f.mu.Lock()
-		f.provCalls++
-		call := f.provCalls
-		f.mu.Unlock()
-		key := "TKEY"
-		if call%2 == 0 {
-			key = "FKEY"
-		}
-		b, _ := wbxml.Marshal(&wbxml.Document{
-			Root: wbxml.E(wbxml.PageProvision, "Provision",
-				wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageProvision, "Policies",
-					wbxml.E(wbxml.PageProvision, "Policy",
-						wbxml.E(wbxml.PageProvision, "PolicyType", wbxml.Text("MS-EAS-Provisioning-WBXML")),
-						wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
-						wbxml.E(wbxml.PageProvision, "PolicyKey", wbxml.Text(key)),
-					),
-				),
-			),
-		}, wbxml.DefaultRegistry())
-		w.Write(b)
-	case "Sync":
-		f.mu.Lock()
-		f.syncCalls++
-		f.mu.Unlock()
-		body, _ := readReqBody(r)
-		doc, err := wbxml.Unmarshal(body, wbxml.DefaultRegistry())
-		if err != nil || doc.Root == nil {
-			http.Error(w, "bad sync", 400)
-			return
-		}
-		var clientID string
-		if cmds := doc.Root.Find("Commands"); cmds != nil {
-			if add := cmds.Find("Add"); add != nil {
-				if cid := add.Find("ClientId"); cid != nil {
-					clientID = cid.TextContent()
-				}
-			}
-		}
-		coll := wbxml.E(wbxml.PageAirSync, "Collection",
-			wbxml.E(wbxml.PageAirSync, "SyncKey", wbxml.Text("C+1")),
-			wbxml.E(wbxml.PageAirSync, "CollectionId", wbxml.Text("cal-id")),
-			wbxml.E(wbxml.PageAirSync, "Status", wbxml.Text("1")),
-		)
-		if clientID != "" {
-			coll.Children = append(coll.Children,
-				wbxml.E(wbxml.PageAirSync, "Responses",
-					wbxml.E(wbxml.PageAirSync, "Add",
-						wbxml.E(wbxml.PageAirSync, "ClientId", wbxml.Text(clientID)),
-						wbxml.E(wbxml.PageAirSync, "ServerId", wbxml.Text("cal-id:99")),
-						wbxml.E(wbxml.PageAirSync, "Status", wbxml.Text("1")),
-					),
-				),
-			)
-		}
-		b, _ := wbxml.Marshal(&wbxml.Document{
-			Root: wbxml.E(wbxml.PageAirSync, "Sync",
-				wbxml.E(wbxml.PageAirSync, "Collections", coll),
-			),
-		}, wbxml.DefaultRegistry())
-		w.Write(b)
-	default:
-		http.Error(w, "unhandled "+cmd, 400)
-	}
-}
-
-func readReqBody(r *http.Request) ([]byte, error) {
-	const max = 1 << 20
-	buf := make([]byte, 0, 4096)
-	tmp := make([]byte, 4096)
-	for len(buf) < max {
-		n, err := r.Body.Read(tmp)
-		if n > 0 {
-			buf = append(buf, tmp[:n]...)
-		}
-		if err != nil {
-			break
-		}
-	}
-	return buf, nil
-}
-
 func TestCalendarCreate_success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc((&calendarCUDFakeServer{}).handle))
-	defer srv.Close()
-	cfg := &config.Config{Accounts: []config.Account{{
-		Name: "alpha", ServerURL: srv.URL, Username: "u", ASVersion: "14.1",
-		DefaultAccess: config.AccessRW,
-		Secret:        config.SecretRef{KeyringService: "x", KeyringAccount: "alpha"},
-	}}}
-	m := NewManager(cfg, &fakeStateProvider{},
-		&fakeResolver{pw: map[string]string{"alpha": "p"}},
-		staticDeviceIDs{"alpha": "abc"})
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			CreateEventFunc: func(_ context.Context, fid string, _ eas.EventDraft) (string, error) {
+				if fid != "cal-id" {
+					t.Errorf("folder = %q", fid)
+				}
+				return "cal-id:99", nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{access: config.AccessRW})
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerCalendarTools(s, m.cfg, m)
 
@@ -421,16 +223,17 @@ func TestCalendarCreate_success(t *testing.T) {
 }
 
 func TestCalendarUpdate_success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc((&calendarCUDFakeServer{}).handle))
-	defer srv.Close()
-	cfg := &config.Config{Accounts: []config.Account{{
-		Name: "alpha", ServerURL: srv.URL, Username: "u", ASVersion: "14.1",
-		DefaultAccess: config.AccessRW,
-		Secret:        config.SecretRef{KeyringService: "x", KeyringAccount: "alpha"},
-	}}}
-	m := NewManager(cfg, &fakeStateProvider{},
-		&fakeResolver{pw: map[string]string{"alpha": "p"}},
-		staticDeviceIDs{"alpha": "abc"})
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			UpdateEventFunc: func(_ context.Context, fid, sid string, _ eas.EventDraft) error {
+				if fid != "cal-id" || sid != "cal-id:42" {
+					t.Errorf("got fid=%q sid=%q", fid, sid)
+				}
+				return nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{access: config.AccessRW})
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerCalendarTools(s, m.cfg, m)
 
@@ -442,16 +245,17 @@ func TestCalendarUpdate_success(t *testing.T) {
 }
 
 func TestCalendarDelete_success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc((&calendarCUDFakeServer{}).handle))
-	defer srv.Close()
-	cfg := &config.Config{Accounts: []config.Account{{
-		Name: "alpha", ServerURL: srv.URL, Username: "u", ASVersion: "14.1",
-		DefaultAccess: config.AccessRW,
-		Secret:        config.SecretRef{KeyringService: "x", KeyringAccount: "alpha"},
-	}}}
-	m := NewManager(cfg, &fakeStateProvider{},
-		&fakeResolver{pw: map[string]string{"alpha": "p"}},
-		staticDeviceIDs{"alpha": "abc"})
+	mock := &easmock.Client{
+		CalendarClient: easmock.CalendarClient{
+			DeleteEventFunc: func(_ context.Context, fid, sid string) error {
+				if fid != "cal-id" || sid != "cal-id:42" {
+					t.Errorf("got fid=%q sid=%q", fid, sid)
+				}
+				return nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{access: config.AccessRW})
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerCalendarTools(s, m.cfg, m)
 

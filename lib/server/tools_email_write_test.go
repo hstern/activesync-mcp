@@ -1,140 +1,37 @@
+// Copyright (C) 2026 Henry Stern
+// SPDX-License-Identifier: MIT
+
 package server
 
 import (
-	"net/http"
-	"net/http/httptest"
+	"context"
 	"strings"
-	"sync"
 	"testing"
 
 	"activesync-mcp/lib/config"
-	"github.com/hstern/go-activesync/wbxml"
 
+	"github.com/hstern/go-activesync/eas"
+	"github.com/hstern/go-activesync/eas/easmock"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// rwManager is like newEmailTestManager but with email write enabled
-// (default_access = rw).
-func rwManager(t *testing.T, srv *httptest.Server) *Manager {
-	t.Helper()
-	cfg := &config.Config{
-		Accounts: []config.Account{{
-			Name:          "alpha",
-			ServerURL:     srv.URL,
-			Username:      "henry",
-			ASVersion:     "14.1",
-			DefaultAccess: config.AccessRW,
-			Secret:        config.SecretRef{KeyringService: "x", KeyringAccount: "alpha"},
-		}},
-	}
-	res := &fakeResolver{pw: map[string]string{"alpha": "p"}}
-	store := &fakeStateProvider{}
-	return NewManager(cfg, store, res, staticDeviceIDs{"alpha": "abc123"})
-}
-
-// writeFakeServer responds to Provision (with two-phase handshake) and
-// echoes empty 200s for any write command. Captures the most recent
-// request body for inspection.
-type writeFakeServer struct {
-	mu    sync.Mutex
-	last  []byte
-	calls int
-}
-
-func (f *writeFakeServer) handle(w http.ResponseWriter, r *http.Request) {
-	body := readAll(r)
-	f.mu.Lock()
-	f.last = body
-	f.mu.Unlock()
-
-	w.Header().Set("Content-Type", "application/vnd.ms-sync.wbxml")
-	cmd := r.URL.Query().Get("Cmd")
-	switch cmd {
-	case "Settings":
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageSettings, "Settings",
-				wbxml.E(wbxml.PageSettings, "Status", wbxml.Text("1")),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-	case "Provision":
-		f.mu.Lock()
-		f.calls++
-		call := f.calls
-		f.mu.Unlock()
-		key := "TKEY"
-		if call == 2 {
-			key = "FKEY"
-		}
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageProvision, "Provision",
-				wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageProvision, "Policies",
-					wbxml.E(wbxml.PageProvision, "Policy",
-						wbxml.E(wbxml.PageProvision, "PolicyType", wbxml.Text("MS-EAS-Provisioning-WBXML")),
-						wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
-						wbxml.E(wbxml.PageProvision, "PolicyKey", wbxml.Text(key)),
-					),
-				),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-	case "Sync":
-		// For ApplyEmailChanges bootstrap + change. Return a simple ack.
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageAirSync, "Sync",
-				wbxml.E(wbxml.PageAirSync, "Collections",
-					wbxml.E(wbxml.PageAirSync, "Collection",
-						wbxml.E(wbxml.PageAirSync, "SyncKey", wbxml.Text("S2")),
-						wbxml.E(wbxml.PageAirSync, "CollectionId", wbxml.Text("inbox")),
-						wbxml.E(wbxml.PageAirSync, "Status", wbxml.Text("1")),
-					),
-				),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-	case "MoveItems":
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageMove, "MoveItems",
-				wbxml.E(wbxml.PageMove, "Response",
-					wbxml.E(wbxml.PageMove, "SrcMsgId", wbxml.Text("inbox:42")),
-					wbxml.E(wbxml.PageMove, "Status", wbxml.Text("3")),
-					wbxml.E(wbxml.PageMove, "DstMsgId", wbxml.Text("archive:7")),
-				),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-	default:
-		// SendMail / SmartReply / SmartForward — empty success.
-		w.WriteHeader(200)
-	}
-}
-
-func readAll(r *http.Request) []byte {
-	const max = 1 << 20
-	buf := make([]byte, 0, 1024)
-	tmp := make([]byte, 4096)
-	for len(buf) < max {
-		n, err := r.Body.Read(tmp)
-		if n > 0 {
-			buf = append(buf, tmp[:n]...)
-		}
-		if err != nil {
-			break
-		}
-	}
-	return buf
+// rwMockManager is a Manager wired with easmock and AccessRW so write
+// tools register and pass CheckClass.
+func rwMockManager(t *testing.T, c eas.Client) *Manager {
+	return newMockManager(t, c, mockManagerOpts{access: config.AccessRW})
 }
 
 func TestEmailSend_buildsValidMIME(t *testing.T) {
-	f := &writeFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := rwManager(t, srv)
+	var sent eas.SendMailOptions
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			SendMailFunc: func(_ context.Context, opts eas.SendMailOptions) error {
+				sent = opts
+				return nil
+			},
+		},
+	}
+	m := rwMockManager(t, mock)
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerEmailWriteTools(s, m.cfg, m)
@@ -148,40 +45,29 @@ func TestEmailSend_buildsValidMIME(t *testing.T) {
 	if out["status"] != "sent" {
 		t.Errorf("status = %v", out["status"])
 	}
-	// Last call should be SendMail with a Mime opaque body.
-	req, err := wbxml.Unmarshal(f.last, wbxml.DefaultRegistry())
-	if err != nil {
-		t.Fatal(err)
+	mime := string(sent.MIME)
+	if !strings.Contains(mime, "To: bob@example.com") {
+		t.Errorf("MIME missing To header:\n%s", mime)
 	}
-	if req.Root.Name != "SendMail" {
-		t.Errorf("root = %q", req.Root.Name)
+	if !strings.Contains(mime, "Subject: Test") {
+		t.Errorf("MIME missing Subject:\n%s", mime)
 	}
-	mimeEl := req.Root.Find("Mime")
-	if mimeEl == nil {
-		t.Fatal("Mime missing")
-	}
-	var mimeBytes []byte
-	for _, c := range mimeEl.Children {
-		if op, ok := c.(wbxml.Opaque); ok {
-			mimeBytes = []byte(op)
-		}
-	}
-	if !strings.Contains(string(mimeBytes), "To: bob@example.com") {
-		t.Errorf("MIME missing To header:\n%s", mimeBytes)
-	}
-	if !strings.Contains(string(mimeBytes), "Subject: Test") {
-		t.Errorf("MIME missing Subject:\n%s", mimeBytes)
-	}
-	if !strings.Contains(string(mimeBytes), "Hello, Bob.") {
-		t.Errorf("MIME missing body:\n%s", mimeBytes)
+	if !strings.Contains(mime, "Hello, Bob.") {
+		t.Errorf("MIME missing body:\n%s", mime)
 	}
 }
 
 func TestEmailReply_includesSourceFolder(t *testing.T) {
-	f := &writeFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := rwManager(t, srv)
+	var got eas.ReplyForwardOptions
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			SmartReplyFunc: func(_ context.Context, opts eas.ReplyForwardOptions) error {
+				got = opts
+				return nil
+			},
+		},
+	}
+	m := rwMockManager(t, mock)
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerEmailWriteTools(s, m.cfg, m)
@@ -192,23 +78,52 @@ func TestEmailReply_includesSourceFolder(t *testing.T) {
 		ID:       "inbox:42",
 		BodyText: "Got it.",
 	})
-	req, _ := wbxml.Unmarshal(f.last, wbxml.DefaultRegistry())
-	if req.Root.Name != "SmartReply" {
-		t.Errorf("root = %q", req.Root.Name)
+	if got.FolderID != "inbox" {
+		t.Errorf("FolderID = %q", got.FolderID)
 	}
-	if req.Root.Find("Source").Find("FolderId").TextContent() != "inbox" {
-		t.Errorf("FolderId wrong")
+	if got.ServerID != "inbox:42" {
+		t.Errorf("ServerID = %q", got.ServerID)
 	}
-	if req.Root.Find("Source").Find("ItemId").TextContent() != "inbox:42" {
-		t.Errorf("ItemId wrong")
+}
+
+func TestEmailForward_includesSourceFolder(t *testing.T) {
+	var got eas.ReplyForwardOptions
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			SmartForwardFunc: func(_ context.Context, opts eas.ReplyForwardOptions) error {
+				got = opts
+				return nil
+			},
+		},
+	}
+	m := rwMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailWriteTools(s, m.cfg, m)
+
+	_ = callTool(t, s, "email_forward", EmailForwardInput{
+		Account: "alpha", FolderID: "inbox", ID: "inbox:42",
+		To:       []EmailAddress{{Address: "carol@x"}},
+		BodyText: "FYI",
+	})
+	if got.FolderID != "inbox" {
+		t.Errorf("FolderID = %q", got.FolderID)
 	}
 }
 
 func TestEmailMove_mapsResults(t *testing.T) {
-	f := &writeFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := rwManager(t, srv)
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			MoveItemsFunc: func(_ context.Context, src, dst string, ids []string) ([]eas.MoveItemResult, error) {
+				if src != "inbox" || dst != "archive" {
+					t.Errorf("got src=%q dst=%q", src, dst)
+				}
+				return []eas.MoveItemResult{
+					{SrcServerID: "inbox:42", DstServerID: "archive:7", Status: 3},
+				}, nil
+			},
+		},
+	}
+	m := rwMockManager(t, mock)
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerEmailWriteTools(s, m.cfg, m)
@@ -229,21 +144,74 @@ func TestEmailMove_mapsResults(t *testing.T) {
 	}
 }
 
-func TestEmailSetFlags_requiresAtLeastOne(t *testing.T) {
-	f := &writeFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := rwManager(t, srv)
-
+func TestEmailDelete_sendsSyncDeleteCommand(t *testing.T) {
+	var got []eas.EmailChange
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			ApplyEmailChangesFunc: func(_ context.Context, _ string, changes []eas.EmailChange) ([]eas.EmailChangeResult, error) {
+				got = changes
+				return []eas.EmailChangeResult{{ServerID: "inbox:42", Status: 1}}, nil
+			},
+		},
+	}
+	m := rwMockManager(t, mock)
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerEmailWriteTools(s, m.cfg, m)
 
-	// Call directly to bypass MCP error-as-result wrapping.
+	out := callTool(t, s, "email_delete", EmailDeleteInput{
+		Account: "alpha", FolderID: "inbox", ID: "inbox:42",
+	})
+	if int(out["status"].(float64)) != 1 {
+		t.Errorf("status = %v, want 1", out["status"])
+	}
+	if len(got) != 1 || !got[0].Delete {
+		t.Errorf("change set = %+v, want one Delete", got)
+	}
+}
+
+func TestEmailSetFlags_marksReadAndFlagged(t *testing.T) {
+	var got []eas.EmailChange
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			ApplyEmailChangesFunc: func(_ context.Context, _ string, changes []eas.EmailChange) ([]eas.EmailChangeResult, error) {
+				got = changes
+				return []eas.EmailChangeResult{{ServerID: "inbox:42", Status: 1}}, nil
+			},
+		},
+	}
+	m := rwMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailWriteTools(s, m.cfg, m)
+
+	read := true
+	flagged := true
+	out := callTool(t, s, "email_set_flags", EmailSetFlagsInput{
+		Account: "alpha", FolderID: "inbox", ID: "inbox:42",
+		Read: &read, Flagged: &flagged,
+	})
+	if int(out["status"].(float64)) != 1 {
+		t.Errorf("status = %v, want 1", out["status"])
+	}
+	if len(got) != 1 {
+		t.Fatalf("change set len = %d", len(got))
+	}
+	if got[0].Read == nil || !*got[0].Read {
+		t.Errorf("Read = %v, want *true", got[0].Read)
+	}
+	if got[0].Flagged == nil || !*got[0].Flagged {
+		t.Errorf("Flagged = %v, want *true", got[0].Flagged)
+	}
+}
+
+func TestEmailSetFlags_requiresAtLeastOne(t *testing.T) {
+	mock := &easmock.Client{} // no Func set; if any method runs, sentinel error fires
+	m := rwMockManager(t, mock)
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailWriteTools(s, m.cfg, m)
+
 	if err := m.CheckClass("alpha", config.ClassEmail, true); err != nil {
 		t.Fatalf("class check: %v", err)
 	}
-	// We exercise the validation path with a manual invocation.
-	// Use the in-process MCP roundtrip; expect IsError=true.
 	ct, st := mcp.NewInMemoryTransports()
 	if _, err := s.Connect(t.Context(), st, nil); err != nil {
 		t.Fatal(err)
@@ -281,11 +249,11 @@ func TestRegisterEmailWriteTools_skippedWhenNoRWAccount(t *testing.T) {
 	m := NewManager(cfg, &fakeStateProvider{}, &fakeResolver{}, staticDeviceIDs{})
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerEmailWriteTools(s, cfg, m)
-	// No assertion: we just expect no panic and no tools registered.
-	// Lint smoke: a separate call to the registration after an unwritable
-	// account is a no-op.
 	_ = m
 }
+
+// MIME / reply-MIME / random-id helpers are pure-Go and don't depend
+// on the EAS layer.
 
 func TestBuildMIME_singlePart(t *testing.T) {
 	mime, err := buildMIME(messageFields{
@@ -325,74 +293,6 @@ func TestBuildMIME_validation(t *testing.T) {
 	}
 	if _, err := buildMIME(messageFields{To: []string{"x@y"}}); err == nil {
 		t.Error("want error for missing body")
-	}
-}
-
-func TestEmailForward_includesSourceFolder(t *testing.T) {
-	f := &writeFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := rwManager(t, srv)
-	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	registerEmailWriteTools(s, m.cfg, m)
-
-	_ = callTool(t, s, "email_forward", EmailForwardInput{
-		Account: "alpha", FolderID: "inbox", ID: "inbox:42",
-		To:       []EmailAddress{{Address: "carol@x"}},
-		BodyText: "FYI",
-	})
-	req, _ := wbxml.Unmarshal(f.last, wbxml.DefaultRegistry())
-	if req.Root.Name != "SmartForward" {
-		t.Errorf("root = %q, want SmartForward", req.Root.Name)
-	}
-	if req.Root.Find("Source").Find("FolderId").TextContent() != "inbox" {
-		t.Error("FolderId wrong on SmartForward Source")
-	}
-}
-
-func TestEmailDelete_sendsSyncDeleteCommand(t *testing.T) {
-	f := &writeFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := rwManager(t, srv)
-	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	registerEmailWriteTools(s, m.cfg, m)
-
-	out := callTool(t, s, "email_delete", EmailDeleteInput{
-		Account: "alpha", FolderID: "inbox", ID: "inbox:42",
-	})
-	// EmailDeleteOutput.Status is the EAS status code (1 = OK).
-	if int(out["status"].(float64)) != 1 {
-		t.Errorf("status = %v, want 1", out["status"])
-	}
-	// The last call is the Sync containing the Delete command.
-	req, _ := wbxml.Unmarshal(f.last, wbxml.DefaultRegistry())
-	if req.Root.Name != "Sync" {
-		t.Errorf("root = %q, want Sync", req.Root.Name)
-	}
-}
-
-func TestEmailSetFlags_marksReadAndFlagged(t *testing.T) {
-	f := &writeFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := rwManager(t, srv)
-	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
-	registerEmailWriteTools(s, m.cfg, m)
-
-	read := true
-	flagged := true
-	out := callTool(t, s, "email_set_flags", EmailSetFlagsInput{
-		Account: "alpha", FolderID: "inbox", ID: "inbox:42",
-		Read: &read, Flagged: &flagged,
-	})
-	if int(out["status"].(float64)) != 1 {
-		t.Errorf("status = %v, want 1", out["status"])
-	}
-	// The last call is a Sync with Change command — verify by structure.
-	req, _ := wbxml.Unmarshal(f.last, wbxml.DefaultRegistry())
-	if req.Root.Name != "Sync" {
-		t.Errorf("root = %q, want Sync", req.Root.Name)
 	}
 }
 

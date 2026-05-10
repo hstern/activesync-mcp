@@ -140,7 +140,7 @@ func (p *PushController) watchAccount(ctx context.Context, accountName string) {
 // subscribedFolders runs FolderSync and picks the inbox + default
 // calendar to subscribe to. EAS limits the Folders count to 16 by
 // default; we deliberately stay much lower.
-func (p *PushController) subscribedFolders(ctx context.Context, c *eas.Client) ([]eas.PingFolder, error) {
+func (p *PushController) subscribedFolders(ctx context.Context, c eas.Client) ([]eas.PingFolder, error) {
 	fs, err := c.FolderSync(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("FolderSync: %w", err)

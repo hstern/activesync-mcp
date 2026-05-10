@@ -1,257 +1,37 @@
+// Copyright (C) 2026 Henry Stern
+// SPDX-License-Identifier: MIT
+
 package server
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"slices"
-	"strings"
-	"sync"
 	"testing"
 
-	"activesync-mcp/lib/config"
-	"github.com/hstern/go-activesync/wbxml"
-
+	"github.com/hstern/go-activesync/eas"
+	"github.com/hstern/go-activesync/eas/easmock"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// emailFakeServer handles Provision (two-phase), FolderSync (one folder
-// per type), Sync (returns one email), and ItemOperations Fetch (returns
-// the same email with full body).
-type emailFakeServer struct {
-	mu        sync.Mutex
-	provCalls int
-	syncCalls int
-}
-
-func (f *emailFakeServer) handle(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/vnd.ms-sync.wbxml")
-	switch r.URL.Query().Get("Cmd") {
-	case "Settings":
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageSettings, "Settings",
-				wbxml.E(wbxml.PageSettings, "Status", wbxml.Text("1")),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-	case "Provision":
-		f.mu.Lock()
-		f.provCalls++
-		call := f.provCalls
-		f.mu.Unlock()
-		key := "TKEY"
-		if call == 2 {
-			key = "FKEY"
-		}
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageProvision, "Provision",
-				wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageProvision, "Policies",
-					wbxml.E(wbxml.PageProvision, "Policy",
-						wbxml.E(wbxml.PageProvision, "PolicyType", wbxml.Text("MS-EAS-Provisioning-WBXML")),
-						wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
-						wbxml.E(wbxml.PageProvision, "PolicyKey", wbxml.Text(key)),
-					),
-				),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-
-	case "FolderSync":
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageFolderHierarchy, "FolderSync",
-				wbxml.E(wbxml.PageFolderHierarchy, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageFolderHierarchy, "SyncKey", wbxml.Text("FS-1")),
-				wbxml.E(wbxml.PageFolderHierarchy, "Changes",
-					wbxml.E(wbxml.PageFolderHierarchy, "Count", wbxml.Text("3")),
-					wbxml.E(wbxml.PageFolderHierarchy, "Add",
-						wbxml.E(wbxml.PageFolderHierarchy, "ServerId", wbxml.Text("inbox-id")),
-						wbxml.E(wbxml.PageFolderHierarchy, "ParentId", wbxml.Text("0")),
-						wbxml.E(wbxml.PageFolderHierarchy, "DisplayName", wbxml.Text("Inbox")),
-						wbxml.E(wbxml.PageFolderHierarchy, "Type", wbxml.Text("2")),
-					),
-					wbxml.E(wbxml.PageFolderHierarchy, "Add",
-						wbxml.E(wbxml.PageFolderHierarchy, "ServerId", wbxml.Text("cal-id")),
-						wbxml.E(wbxml.PageFolderHierarchy, "ParentId", wbxml.Text("0")),
-						wbxml.E(wbxml.PageFolderHierarchy, "DisplayName", wbxml.Text("Calendar")),
-						wbxml.E(wbxml.PageFolderHierarchy, "Type", wbxml.Text("8")),
-					),
-					wbxml.E(wbxml.PageFolderHierarchy, "Add",
-						wbxml.E(wbxml.PageFolderHierarchy, "ServerId", wbxml.Text("project-id")),
-						wbxml.E(wbxml.PageFolderHierarchy, "ParentId", wbxml.Text("inbox-id")),
-						wbxml.E(wbxml.PageFolderHierarchy, "DisplayName", wbxml.Text("Project")),
-						wbxml.E(wbxml.PageFolderHierarchy, "Type", wbxml.Text("12")),
-					),
-				),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-
-	case "Sync":
-		f.mu.Lock()
-		f.syncCalls++
-		call := f.syncCalls
-		f.mu.Unlock()
-		key := "S1"
-		var cmds *wbxml.Element
-		if call == 2 {
-			key = "S2"
-			cmds = wbxml.E(wbxml.PageAirSync, "Commands",
-				wbxml.E(wbxml.PageAirSync, "Add",
-					wbxml.E(wbxml.PageAirSync, "ServerId", wbxml.Text("inbox-id:42")),
-					wbxml.E(wbxml.PageAirSync, "ApplicationData",
-						wbxml.E(wbxml.PageEmail, "Subject", wbxml.Text("Hi")),
-						wbxml.E(wbxml.PageEmail, "From", wbxml.Text("alice@x")),
-						wbxml.E(wbxml.PageEmail, "To", wbxml.Text("henry@x")),
-						wbxml.E(wbxml.PageEmail, "DateReceived", wbxml.Text("2024-01-15T12:00:00.000Z")),
-						wbxml.E(wbxml.PageEmail, "Read", wbxml.Text("0")),
-						wbxml.E(wbxml.PageAirSyncBase, "Body",
-							wbxml.E(wbxml.PageAirSyncBase, "Type", wbxml.Text("1")),
-							wbxml.E(wbxml.PageAirSyncBase, "Data", wbxml.Text("preview body")),
-						),
-					),
-				),
-			)
-		}
-		coll := wbxml.E(wbxml.PageAirSync, "Collection",
-			wbxml.E(wbxml.PageAirSync, "SyncKey", wbxml.Text(key)),
-			wbxml.E(wbxml.PageAirSync, "CollectionId", wbxml.Text("inbox-id")),
-			wbxml.E(wbxml.PageAirSync, "Status", wbxml.Text("1")),
-		)
-		if cmds != nil {
-			coll.Children = append(coll.Children, cmds)
-		}
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageAirSync, "Sync",
-				wbxml.E(wbxml.PageAirSync, "Collections", coll),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-
-	case "Search":
-		mime := []byte("preview body")
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageSearch, "Search",
-				wbxml.E(wbxml.PageSearch, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageSearch, "Response",
-					wbxml.E(wbxml.PageSearch, "Store",
-						wbxml.E(wbxml.PageSearch, "Status", wbxml.Text("1")),
-						wbxml.E(wbxml.PageSearch, "Total", wbxml.Text("1")),
-						wbxml.E(wbxml.PageSearch, "Range", wbxml.Text("0-0")),
-						wbxml.E(wbxml.PageSearch, "Result",
-							wbxml.E(wbxml.PageSearch, "LongId", wbxml.Text("inbox-id:42")),
-							wbxml.E(wbxml.PageSearch, "Properties",
-								wbxml.E(wbxml.PageEmail, "Subject", wbxml.Text("Hi")),
-								wbxml.E(wbxml.PageEmail, "From", wbxml.Text("alice@x")),
-								wbxml.E(wbxml.PageAirSyncBase, "Body",
-									wbxml.E(wbxml.PageAirSyncBase, "Type", wbxml.Text("1")),
-									wbxml.E(wbxml.PageAirSyncBase, "Data", wbxml.Text(string(mime))),
-								),
-							),
-						),
-					),
-				),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-
-	case "ItemOperations":
-		mime := []byte("From: alice@x\r\nTo: henry@x\r\nSubject: Hi\r\n\r\nFull message body")
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PageItemOperations, "ItemOperations",
-				wbxml.E(wbxml.PageItemOperations, "Status", wbxml.Text("1")),
-				wbxml.E(wbxml.PageItemOperations, "Response",
-					wbxml.E(wbxml.PageItemOperations, "Fetch",
-						wbxml.E(wbxml.PageItemOperations, "Status", wbxml.Text("1")),
-						wbxml.E(wbxml.PageAirSync, "ServerId", wbxml.Text("inbox-id:42")),
-						wbxml.E(wbxml.PageItemOperations, "Properties",
-							wbxml.E(wbxml.PageEmail, "Subject", wbxml.Text("Hi")),
-							wbxml.E(wbxml.PageAirSyncBase, "Body",
-								wbxml.E(wbxml.PageAirSyncBase, "Type", wbxml.Text("4")),
-								wbxml.E(wbxml.PageAirSyncBase, "Data", wbxml.Opaque(mime)),
-							),
-						),
-					),
-				),
-			),
-		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
-		w.Write(b)
-
-	default:
-		http.Error(w, "unhandled "+r.URL.Query().Get("Cmd"), 400)
-	}
-}
-
-func newEmailTestManager(t *testing.T, srv *httptest.Server) *Manager {
-	t.Helper()
-	cfg := &config.Config{
-		Accounts: []config.Account{{
-			Name:          "alpha",
-			ServerURL:     srv.URL,
-			Username:      "u",
-			ASVersion:     "14.1",
-			DefaultAccess: config.AccessRO,
-			Secret:        config.SecretRef{KeyringService: "x", KeyringAccount: "alpha"},
-		}},
-	}
-	res := &fakeResolver{pw: map[string]string{"alpha": "p"}}
-	store := &fakeStateProvider{}
-	return NewManager(cfg, store, res, staticDeviceIDs{"alpha": "abc123"})
-}
-
-// callTool invokes a registered tool by name, returning the JSON object
-// from its TextContent.
-func callTool(t *testing.T, srv *mcp.Server, name string, args any) map[string]any {
-	t.Helper()
-	// Connect a client transport in-process.
-	ct, st := mcp.NewInMemoryTransports()
-	ctx := context.Background()
-	if _, err := srv.Connect(ctx, st, nil); err != nil {
-		t.Fatal(err)
-	}
-	c := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
-	cs, err := c.Connect(ctx, ct, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cs.Close()
-
-	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
-		Name:      name,
-		Arguments: args,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.IsError {
-		t.Fatalf("tool error: %+v", res)
-	}
-	if len(res.Content) == 0 {
-		t.Fatal("no content")
-	}
-	tc, ok := res.Content[0].(*mcp.TextContent)
-	if !ok {
-		t.Fatalf("content type: %T", res.Content[0])
-	}
-	var out map[string]any
-	if err := json.Unmarshal([]byte(tc.Text), &out); err != nil {
-		t.Fatalf("unmarshal: %v\nbody: %s", err, tc.Text)
-	}
-	return out
+// folderSyncFolders is the canned FolderSync result reused across email
+// tests: an Inbox (Type 2), a Calendar (Type 8, filtered out by
+// email_list_folders), and a user mail folder (Type 12).
+var folderSyncFolders = &eas.FolderSyncResult{
+	SyncKey: "FS-1",
+	Added: []eas.Folder{
+		{ServerID: "inbox-id", ParentID: "0", DisplayName: "Inbox", Type: eas.FolderTypeInbox},
+		{ServerID: "cal-id", ParentID: "0", DisplayName: "Calendar", Type: eas.FolderTypeCalendar},
+		{ServerID: "project-id", ParentID: "inbox-id", DisplayName: "Project", Type: eas.FolderTypeUserMail},
+	},
 }
 
 func TestEmailListFolders_filtersToMail(t *testing.T) {
-	f := &emailFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := newEmailTestManager(t, srv)
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			FolderSyncFunc: func(context.Context) (*eas.FolderSyncResult, error) { return folderSyncFolders, nil },
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerEmailReadTools(s, m.cfg, m)
@@ -261,7 +41,6 @@ func TestEmailListFolders_filtersToMail(t *testing.T) {
 	if !ok {
 		t.Fatalf("folders missing or wrong type: %T", out["folders"])
 	}
-	// Calendar (type 8) should be filtered out; Inbox + Project remain.
 	if len(folders) != 2 {
 		t.Errorf("len(folders) = %d (got %v)", len(folders), folders)
 	}
@@ -277,10 +56,28 @@ func TestEmailListFolders_filtersToMail(t *testing.T) {
 }
 
 func TestEmailList_returnsItem(t *testing.T) {
-	f := &emailFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := newEmailTestManager(t, srv)
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			SyncEmailFunc: func(_ context.Context, fid string, _ eas.EmailSyncOptions) (*eas.EmailSyncResult, error) {
+				if fid != "inbox-id" {
+					t.Errorf("folder = %q", fid)
+				}
+				return &eas.EmailSyncResult{
+					SyncKey: "S2",
+					Added: []eas.EmailItem{
+						{
+							ServerID: "inbox-id:42",
+							Subject:  "Hi",
+							From:     "alice@x",
+							To:       "henry@x",
+							Body:     "preview body",
+						},
+					},
+				}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerEmailReadTools(s, m.cfg, m)
@@ -306,10 +103,23 @@ func TestEmailList_returnsItem(t *testing.T) {
 }
 
 func TestEmailGet_returnsMIME(t *testing.T) {
-	f := &emailFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := newEmailTestManager(t, srv)
+	mime := []byte("From: alice@x\r\nTo: henry@x\r\nSubject: Hi\r\n\r\nFull message body")
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			FetchEmailFunc: func(_ context.Context, fid, sid string, _ eas.FetchEmailOptions) (*eas.EmailItem, error) {
+				if fid != "inbox-id" || sid != "inbox-id:42" {
+					t.Errorf("got fid=%q sid=%q", fid, sid)
+				}
+				return &eas.EmailItem{
+					ServerID: sid,
+					Subject:  "Hi",
+					BodyType: eas.BodyTypeMIME,
+					BodyMIME: mime,
+				}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerEmailReadTools(s, m.cfg, m)
@@ -322,17 +132,29 @@ func TestEmailGet_returnsMIME(t *testing.T) {
 	if out["body_type"] != "mime" {
 		t.Errorf("body_type: %v", out["body_type"])
 	}
-	mime, _ := out["body_mime"].(string)
-	if !strings.Contains(mime, "Full message body") {
-		t.Errorf("body_mime missing marker:\n%s", mime)
+	if got, _ := out["body_mime"].(string); got == "" || !contains(got, "Full message body") {
+		t.Errorf("body_mime missing marker: %q", got)
 	}
 }
 
 func TestEmailSearch_returnsHits(t *testing.T) {
-	f := &emailFakeServer{}
-	srv := httptest.NewServer(http.HandlerFunc(f.handle))
-	defer srv.Close()
-	m := newEmailTestManager(t, srv)
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			SearchEmailFunc: func(_ context.Context, q string, _ eas.EmailSearchOptions) (*eas.EmailSearchResult, error) {
+				if q != "Hi" {
+					t.Errorf("query = %q", q)
+				}
+				return &eas.EmailSearchResult{
+					Total: 1,
+					Range: "0-0",
+					Items: []eas.EmailItem{
+						{ServerID: "inbox-id:42", Subject: "Hi", From: "alice@x"},
+					},
+				}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
 	registerEmailReadTools(s, m.cfg, m)
@@ -353,6 +175,8 @@ func TestEmailSearch_returnsHits(t *testing.T) {
 	}
 }
 
+// TestParseDateWindow and TestParseFormat exercise package-private
+// helpers that aren't tied to the EAS layer.
 func TestParseDateWindow(t *testing.T) {
 	cases := map[string]int{
 		"":     int(4), // FilterTwoWeek
@@ -386,4 +210,15 @@ func TestParseFormat(t *testing.T) {
 			t.Errorf("parseFormat(%q) = %q, want %q", c.in, name, c.want)
 		}
 	}
+}
+
+// contains is a tiny strings.Contains alias so the rewritten tests
+// don't carry a strings import they otherwise wouldn't need.
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
