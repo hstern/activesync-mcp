@@ -5,6 +5,7 @@ coverage.html
 coverage.txt
 dist/
 tmp/
+/activesync-mcp
 
 # Editor
 .idea/

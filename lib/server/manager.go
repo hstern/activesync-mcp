@@ -108,6 +108,28 @@ func NewDefaultManager(cfg *config.Config, store StateProvider, deviceSeed strin
 	return NewManager(cfg, store, config.DefaultResolver(), dev), nil
 }
 
+// WarmRequired pre-builds clients for every account flagged with
+// `discovery_required = true`. Used at serve startup so accounts that
+// can't tolerate a missing ServerURL fail loudly before the MCP loop
+// starts handling requests, instead of returning per-tool errors
+// later. Returns the first error encountered; on success, returns nil.
+//
+// Accounts with discovery_required=false are left for the lazy path —
+// their first tool call will trigger client construction (and surface
+// any autodiscover failure as that tool's IsError result).
+func (m *Manager) WarmRequired(ctx context.Context) error {
+	for i := range m.cfg.Accounts {
+		a := &m.cfg.Accounts[i]
+		if !a.DiscoveryRequired {
+			continue
+		}
+		if _, err := m.Client(ctx, a.Name); err != nil {
+			return fmt.Errorf("warm %q: %w", a.Name, err)
+		}
+	}
+	return nil
+}
+
 // Client returns a provisioned EAS client for the named account. First
 // call performs lookup, password resolution, client construction, and
 // the Provision handshake. Subsequent calls return the cached client.
@@ -172,19 +194,45 @@ func (m *Manager) getOrBuildClient(ctx context.Context, a *config.Account) (*man
 		State:      m.store.AccountState(a.Name),
 	}
 
-	switch a.Secret.AuthScheme {
-	case "", "basic":
-		// Resolve once: Basic auth doesn't need a refresh callback.
+	// Resolve the password up front for any scheme that uses one; we
+	// also need it for autodiscover when ServerURL is empty.
+	var resolvedPW string
+	if a.Secret.AuthScheme == "" || a.Secret.AuthScheme == "basic" ||
+		a.Secret.AuthScheme == "ntlm" || a.Secret.AuthScheme == "bearer" {
 		pw, err := m.resolver.Resolve(ctx, a)
 		if err != nil {
 			return nil, fmt.Errorf("manager: account %q: resolve secret: %w", a.Name, err)
 		}
-		cfg.Password = pw
+		resolvedPW = pw
+	}
+
+	// If ServerURL is empty, autodiscover. Bearer accounts use the
+	// resolved token as the autodiscover password (most IdPs let you
+	// authenticate Autodiscover with a token); Negotiate accounts must
+	// supply ServerURL explicitly because there's no password to feed
+	// the discovery handshake.
+	if cfg.ServerURL == "" {
+		if a.Secret.AuthScheme == "negotiate" {
+			return nil, fmt.Errorf("manager: account %q: server_url is required when auth_scheme=negotiate (no password to drive autodiscover)", a.Name)
+		}
+		res, err := eas.Autodiscover(ctx, a.Username, resolvedPW, eas.AutodiscoverOptions{
+			HTTPClient: cfg.HTTPClient,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("manager: account %q: autodiscover: %w", a.Name, err)
+		}
+		cfg.ServerURL = res.URL
+	}
+
+	switch a.Secret.AuthScheme {
+	case "", "basic":
+		cfg.Password = resolvedPW
 
 	case "bearer":
-		// Wrap resolver in a per-request callback so OAuth refresh tokens
-		// can be re-fetched (the resolver's command/keyring may itself
-		// implement caching or refresh logic).
+		// Use the resolved value for the initial request, but wire a
+		// refresh callback so OAuth refresh tokens can be re-fetched on
+		// 401 (the resolver's command/keyring may itself implement
+		// caching or refresh logic).
 		acct := a
 		cfg.AuthHeader = func(ctx context.Context) (string, error) {
 			tok, err := m.resolver.Resolve(ctx, acct)
@@ -196,11 +244,7 @@ func (m *Manager) getOrBuildClient(ctx context.Context, a *config.Account) (*man
 		cfg.RetryOn401 = true
 
 	case "ntlm":
-		pw, err := m.resolver.Resolve(ctx, a)
-		if err != nil {
-			return nil, fmt.Errorf("manager: account %q: resolve secret: %w", a.Name, err)
-		}
-		cfg.Password = pw
+		cfg.Password = resolvedPW
 		// NTLM is a transport-layer handshake; wrap the existing
 		// http.Client transport. Username can be in DOMAIN\user form;
 		// go-ntlmssp parses that.

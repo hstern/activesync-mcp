@@ -73,8 +73,8 @@ $(GOVULNCHECK):
 	go install golang.org/x/vuln/cmd/govulncheck@latest
 
 .PHONY: build
-build: ## Compile every package
-	go build ./...
+build: ## Build ./activesync-mcp from cmd/activesync-mcp
+	go build -o activesync-mcp ./cmd/activesync-mcp
 
 .PHONY: test
 test: ## Race detector + coverage (matches CI)
@@ -136,8 +136,8 @@ testenv-down: ## Tear the sibling go-activesync testenv down
 # ---------------------------------------------------------------------------
 
 .PHONY: clean
-clean: ## Remove generated coverage artefacts
-	rm -f coverage.out coverage.html
+clean: ## Remove built binary + coverage artefacts
+	rm -f coverage.out coverage.html activesync-mcp
 
 .PHONY: all
 all: ci ## Run the full CI parity suite

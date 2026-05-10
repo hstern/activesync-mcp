@@ -25,17 +25,28 @@ type Config struct {
 
 // Account describes a single ActiveSync account.
 type Account struct {
-	Name          string            `toml:"name"`
-	ServerURL     string            `toml:"server_url"`
-	Username      string            `toml:"username"`
-	DeviceType    string            `toml:"device_type"`
-	DeviceID      string            `toml:"device_id"`
-	ASVersion     string            `toml:"as_version"`
-	UserAgent     string            `toml:"user_agent"`
-	AllowInsecure bool              `toml:"allow_insecure"`
-	Secret        SecretRef         `toml:"secret"`
-	DefaultAccess string            `toml:"default_access"`
-	Access        map[string]string `toml:"access"`
+	Name string `toml:"name"`
+	// ServerURL is the EAS endpoint (e.g.
+	// "https://mail.example.com/Microsoft-Server-ActiveSync"). When
+	// empty, the manager runs Autodiscover with Username + the
+	// resolved password to derive it; see DiscoveryRequired for the
+	// failure-mode knob.
+	ServerURL string `toml:"server_url"`
+	Username  string `toml:"username"`
+	// DiscoveryRequired controls what happens when ServerURL is empty
+	// AND autodiscover fails. When false (default), the failure
+	// surfaces per-tool-call (other accounts keep working); when
+	// true, the manager pre-warms this account at startup and a
+	// failure aborts `serve`.
+	DiscoveryRequired bool              `toml:"discovery_required"`
+	DeviceType        string            `toml:"device_type"`
+	DeviceID          string            `toml:"device_id"`
+	ASVersion         string            `toml:"as_version"`
+	UserAgent         string            `toml:"user_agent"`
+	AllowInsecure     bool              `toml:"allow_insecure"`
+	Secret            SecretRef         `toml:"secret"`
+	DefaultAccess     string            `toml:"default_access"`
+	Access            map[string]string `toml:"access"`
 	// Push enables a background long-poll Ping that surfaces server-side
 	// changes as MCP resource-update notifications. Off by default.
 	Push bool `toml:"push"`
@@ -211,9 +222,8 @@ func (c *Config) validate() error {
 			return fmt.Errorf("account[%d] %q: duplicate name", i, a.Name)
 		}
 		seen[a.Name] = struct{}{}
-		if a.ServerURL == "" {
-			return fmt.Errorf("account %q: server_url is required", a.Name)
-		}
+		// server_url is optional: when empty, the manager runs
+		// Autodiscover at first use. See Account.DiscoveryRequired.
 		if a.Username == "" {
 			return fmt.Errorf("account %q: username is required", a.Name)
 		}

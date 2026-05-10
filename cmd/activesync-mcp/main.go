@@ -2,10 +2,9 @@
 //
 // Subcommands:
 //
-//	serve          (default) run the stdio MCP server
-//	keyring set    store an account password in the OS keyring
-//	keyring get    report whether a keyring entry is set
-//	keyring delete remove a keyring entry
+//	serve   (default) run the stdio MCP server
+//	setup   interactive TUI to add/edit/delete accounts and credentials
+//	doctor  validate config and probe each account's server
 package main
 
 import (
@@ -13,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -48,10 +48,8 @@ func run(argv []string, stdout, stderr *os.File) int {
 	switch sub {
 	case "", "serve":
 		return runServe(rest, &configPath, stderr)
-	case "keyring":
-		return runKeyring(rest, &configPath, stdout, stderr)
-	case "autodiscover":
-		return runAutodiscover(rest, stdout, stderr)
+	case "setup":
+		return runSetup(rest, &configPath, stdout, stderr)
 	case "doctor":
 		return runDoctor(rest, &configPath, stdout, stderr)
 	case "help", "-h", "--help":
@@ -92,9 +90,8 @@ func runServe(argv []string, configPath *string, stderr *os.File) int {
 		os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := loadConfigOrHint(*configPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "activesync-mcp: %v\n", err)
 		return exitConfig
 	}
 
@@ -109,6 +106,13 @@ func runServe(argv []string, configPath *string, stderr *os.File) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "activesync-mcp: %v\n", err)
 		return exitConfig
+	}
+	// Pre-warm any accounts marked discovery_required=true. If
+	// autodiscover is going to fail for one of them, fail the whole
+	// serve here rather than silently degrading at first tool call.
+	if err := mgr.WarmRequired(ctx); err != nil {
+		fmt.Fprintf(stderr, "activesync-mcp: %v\n", err)
+		return exitRuntime
 	}
 	srv := server.Build(cfg, mgr)
 
@@ -133,25 +137,48 @@ func hostnameSeed() string {
 	return host + "|" + home
 }
 
+// loadConfigOrHint wraps config.Load: on a "file not found" error it
+// prints a copy-pasteable bootstrap walkthrough on stderr (so a user
+// invoking `serve`/`doctor`/`keyring` for the first time isn't left
+// with a bare "no such file" message). On any other error it prints
+// the error verbatim. In either case the returned err is non-nil and
+// the caller should return exitConfig.
+func loadConfigOrHint(path string, stderr *os.File) (*config.Config, error) {
+	cfg, err := config.Load(path)
+	if err == nil {
+		return cfg, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		fmt.Fprintf(stderr, `activesync-mcp: no config file at %s
+
+To create one, run:
+  activesync-mcp setup
+
+The setup TUI walks you through adding accounts, stores credentials
+in the OS keyring, and tests the connection before saving.
+`, path)
+		return nil, err
+	}
+	fmt.Fprintf(stderr, "activesync-mcp: %v\n", err)
+	return nil, err
+}
+
 func printUsage(w *os.File) {
 	fmt.Fprintf(w, `activesync-mcp — MCP server exposing email, calendar, contacts, tasks, and notes via ActiveSync
 
 Usage:
   activesync-mcp [serve] [--config PATH]
-  activesync-mcp keyring set    --account NAME [--config PATH]
-  activesync-mcp keyring get    --account NAME [--config PATH]
-  activesync-mcp keyring delete --account NAME [--config PATH]
-  activesync-mcp autodiscover --email EMAIL [--insecure]
+  activesync-mcp setup [--config PATH]
   activesync-mcp doctor [--config PATH]
 
 Default config path: %s
 
 The 'serve' subcommand starts the MCP stdio server (this is the default).
-The 'keyring' subcommands manage the OS-keyring entries referenced by each
-account's secret = { keyring_service = ..., keyring_account = ... } block.
-The 'autodiscover' subcommand probes Autodiscover endpoints for an email
-address and prints a config snippet you can paste into config.toml. The
-'doctor' subcommand validates the config and runs an HTTP OPTIONS request
-against each account's server (no Provision, no state mutation).
+The 'setup' subcommand opens an interactive TUI for adding, editing, and
+deleting accounts. It manages the OS keyring entries for each account
+and offers a connection test before saving. Use it for first-run config
+or any later credential change.
+The 'doctor' subcommand validates the config and runs an HTTP OPTIONS
+request against each account's server (no Provision, no state mutation).
 `, config.DefaultPath())
 }

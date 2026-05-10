@@ -86,7 +86,7 @@ func TestRunDoctor_badConfig(t *testing.T) {
 		t.Errorf("exit %d", code)
 	}
 	_, e := read()
-	if !strings.Contains(e, "open config") {
+	if !strings.Contains(e, "activesync-mcp setup") {
 		t.Errorf("stderr: %s", e)
 	}
 }

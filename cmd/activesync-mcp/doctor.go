@@ -26,9 +26,8 @@ func runDoctor(argv []string, configPath *string, stdout, stderr *os.File) int {
 	if err := fs.Parse(argv); err != nil {
 		return exitUsageErr
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, err := loadConfigOrHint(*configPath, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "activesync-mcp doctor: %v\n", err)
 		return exitConfig
 	}
 

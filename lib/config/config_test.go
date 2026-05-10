@@ -120,15 +120,6 @@ secret     = { command = ["x"] }`,
 			wantSub: "duplicate name",
 		},
 		{
-			name: "missing server_url",
-			src: `
-[[account]]
-name     = "a"
-username = "u"
-secret   = { command = ["x"] }`,
-			wantSub: "server_url is required",
-		},
-		{
 			name: "missing username",
 			src: `
 [[account]]
@@ -364,6 +355,29 @@ secret     = { auth_scheme = "negotiate" }
 	}
 	if c.Accounts[0].Secret.AuthScheme != "negotiate" {
 		t.Errorf("AuthScheme = %q", c.Accounts[0].Secret.AuthScheme)
+	}
+}
+
+func TestDecode_serverURLOptional(t *testing.T) {
+	// server_url is optional — empty value triggers serve-time
+	// autodiscover via the Manager. The validator must accept the
+	// account; defaults are still applied.
+	src := `
+[[account]]
+name       = "work"
+username   = "henry@example.com"
+secret     = { command = ["echo", "p"] }
+discovery_required = true
+`
+	c, err := Decode(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if c.Accounts[0].ServerURL != "" {
+		t.Errorf("ServerURL = %q, want empty", c.Accounts[0].ServerURL)
+	}
+	if !c.Accounts[0].DiscoveryRequired {
+		t.Error("DiscoveryRequired should round-trip from TOML")
 	}
 }
 
