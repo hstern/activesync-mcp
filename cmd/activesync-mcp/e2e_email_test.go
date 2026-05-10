@@ -206,22 +206,13 @@ func TestE2E_EmailForward(t *testing.T) {
 		})
 	})
 
-	// Same Z-Push BackendIMAP SmartForward limitation as reply (hstern/go-activesync#3).
-	res, err := cs.CallTool(t.Context(), &mcp.CallToolParams{
-		Name: "email_forward",
-		Arguments: server.EmailForwardInput{
-			Account: "test", FolderID: inbox, ID: row.ID,
-			To:       []server.EmailAddress{{Address: "integration@asmcp.test"}},
-			BodyText: "fwd from e2e test",
-		},
-	})
-	if err != nil {
-		t.Fatalf("CallTool transport error: %v", err)
-	}
-	if res.IsError {
-		t.Logf("email_forward returned IsError (Z-Push BackendIMAP limitation): %s",
-			formatContent(res.Content))
-	}
+	// SmartForward works since the testenv fix for IMAP_DEFAULT_CHARSET
+	// + IMAP_INLINE_FORWARD landed (hstern/go-activesync#3).
+	callTool(t, cs, "email_forward", server.EmailForwardInput{
+		Account: "test", FolderID: inbox, ID: row.ID,
+		To:       []server.EmailAddress{{Address: "integration@asmcp.test"}},
+		BodyText: "fwd from e2e test",
+	}, nil)
 }
 
 func TestE2E_EmailMove(t *testing.T) {
