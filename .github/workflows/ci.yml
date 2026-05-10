@@ -95,9 +95,15 @@ jobs:
 
   # ------------------------------------------------------------------------
   # Tier 2 — integration tests against real OS surfaces (keyring, bbolt,
-  # signals, CLI subcommands). Cross-platform; Linux runs once per
-  # D-Bus Secret Service provider (gnome-keyring vs kwalletd6) since
-  # both are common in the wild.
+  # signals, CLI subcommands). Cross-platform.
+  #
+  # Linux runs against gnome-keyring as the D-Bus Secret Service provider.
+  # KWallet implements the same Secret Service API and would, in
+  # principle, slot in as another matrix entry — but neither kwalletd5
+  # nor kwalletd6 ships as a top-level package on the GitHub Actions
+  # ubuntu-latest (24.04 noble) runners after the KF6 reorg, so the
+  # kwallet leg is currently disabled. See task list for follow-up
+  # (build kwalletd in a Docker layer, or run a sidecar container).
   # ------------------------------------------------------------------------
   integration:
     strategy:
@@ -110,8 +116,6 @@ jobs:
             ss-provider: wincred
           - os: ubuntu-latest
             ss-provider: gnome-keyring
-          - os: ubuntu-latest
-            ss-provider: kwallet
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
@@ -131,17 +135,6 @@ jobs:
           eval $(dbus-launch --sh-syntax)
           echo -n "" | gnome-keyring-daemon --unlock
           gnome-keyring-daemon --start --components=secrets
-          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> $GITHUB_ENV
-
-      - name: install + start kwalletd5 in secret-service mode
-        if: matrix.os == 'ubuntu-latest' && matrix.ss-provider == 'kwallet'
-        run: |
-          sudo apt-get update
-          # kwalletd6 isn't packaged on noble; kwalletd5 is the available
-          # SS provider. The Secret Service API surface is the same.
-          sudo apt-get install -y kwalletd5 libsecret-1-0 dbus-x11
-          eval $(dbus-launch --sh-syntax)
-          kwalletd5 --secret-service &
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> $GITHUB_ENV
 
       - name: integration tests
