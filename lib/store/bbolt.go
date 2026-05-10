@@ -6,6 +6,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/hstern/go-activesync/eas"
 
 	"go.etcd.io/bbolt"
+	bberrors "go.etcd.io/bbolt/errors"
 )
 
 // Bucket layout
@@ -38,6 +40,13 @@ func Open(path string) (*DB, error) {
 	}
 	bdb, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
+		// bbolt holds an exclusive flock on the database file, so a
+		// second activesync-mcp talking to the same state.db will see
+		// ErrTimeout after our 5s open budget. Surface the actual
+		// cause instead of the cryptic "timeout".
+		if errors.Is(err, bberrors.ErrTimeout) {
+			return nil, fmt.Errorf("store: open %s: another activesync-mcp process appears to be running (state.db is locked by another process; check `pgrep -af activesync-mcp` and stop the other instance, or point this one at a different state_dir in config.toml)", path)
+		}
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
 	if err := bdb.Update(func(tx *bbolt.Tx) error {

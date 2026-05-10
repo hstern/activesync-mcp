@@ -161,6 +161,28 @@ func TestResetAccount(t *testing.T) {
 	}
 }
 
+func TestOpen_lockHeldByAnotherProcess(t *testing.T) {
+	// bbolt's exclusive flock is the simulated-second-process trap
+	// users hit when they accidentally launch two `activesync-mcp
+	// serve` instances against the same state_dir. The cryptic
+	// "timeout" they used to see now becomes an actionable message
+	// naming the root cause.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	_, err = Open(path)
+	if err == nil {
+		t.Fatal("want error opening a second handle to the same db")
+	}
+	if !strings.Contains(err.Error(), "another activesync-mcp process") {
+		t.Errorf("err = %v; want one mentioning the other process", err)
+	}
+}
+
 func TestOpen_unwritablePath(t *testing.T) {
 	// Use an existing regular file as the parent directory: MkdirAll
 	// fails because the parent isn't a directory. The error path is
