@@ -254,14 +254,29 @@ jobs:
           # Refresh the package index and install just what the keyring
           # tests need: kwallet (provides /usr/bin/kwalletd6), dbus
           # (session bus), libsecret (Secret Service client side, used
-          # by go-keyring), git (for the checkout action), and the Go
-          # toolchain itself — setup-go's apt path doesn't apply here.
+          # by go-keyring), git (for the checkout action and Go's VCS
+          # stamp), and the Go toolchain itself — setup-go's apt path
+          # doesn't apply here.
           pacman -Sy --noconfirm --needed \
             kwallet dbus libsecret git go base-devel ca-certificates
 
       - uses: actions/checkout@v6
 
+      - name: mark workspace safe for git
+        # The container runs as root but actions/checkout writes the
+        # workspace as the runner uid; without this, `go build`
+        # subprocesses spawned by the integration tests fail with
+        # "error obtaining VCS status: exit status 128" because Go
+        # asks git for the build stamp and git refuses to read a
+        # repo with mismatched ownership.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: start dbus session + kwalletd6
+        env:
+          # kwalletd6 is a Qt app. Without a display server it
+          # segfaults at QApplication construction unless we point
+          # Qt at the offscreen platform plugin.
+          QT_QPA_PLATFORM: offscreen
         run: |
           # GitHub Actions doesn't give the container a session bus by
           # default; spin one up. dbus-launch returns the address +
@@ -269,19 +284,36 @@ jobs:
           # binary it talks to) can find it.
           eval "$(dbus-launch --sh-syntax)"
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          echo "QT_QPA_PLATFORM=offscreen" >> "$GITHUB_ENV"
 
           # `--secret-service` makes kwalletd6 register on the bus as
           # org.freedesktop.secrets — the Secret Service interface
-          # zalando/go-keyring uses. With no existing wallet the
-          # daemon creates an empty default one without prompting.
-          # `--pam-login` is intentionally omitted; we don't have a
-          # PAM context here.
-          kwalletd6 --secret-service &
-          # Give the daemon a moment to register on the bus before
-          # the first test call. The Go test process polls for it
-          # via the Secret Service interface either way, but a 1s
-          # head start keeps the first test from racing the daemon.
-          sleep 1
+          # zalando/go-keyring uses.
+          kwalletd6 --secret-service >/tmp/kwalletd6.log 2>&1 &
+          KWPID=$!
+
+          # Wait for kwalletd6 to register on the bus before the first
+          # test call. If the daemon isn't reachable within 10s,
+          # surface its log and fail the step so we don't waste a 5m
+          # test timeout chasing a daemon that never started.
+          for i in $(seq 1 20); do
+            if dbus-send --session --print-reply --dest=org.freedesktop.DBus \
+                /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner \
+                string:org.freedesktop.secrets 2>/dev/null \
+                | grep -q "boolean true"; then
+              echo "kwalletd6 registered on the Secret Service bus name"
+              exit 0
+            fi
+            if ! kill -0 "$KWPID" 2>/dev/null; then
+              echo "::error::kwalletd6 exited before registering"
+              cat /tmp/kwalletd6.log || true
+              exit 1
+            fi
+            sleep 0.5
+          done
+          echo "::error::kwalletd6 did not register on the bus within 10s"
+          cat /tmp/kwalletd6.log || true
+          exit 1
 
       - name: install gotestsum
         run: go install gotest.tools/gotestsum@latest
