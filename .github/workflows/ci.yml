@@ -133,13 +133,15 @@ jobs:
           gnome-keyring-daemon --start --components=secrets
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> $GITHUB_ENV
 
-      - name: install + start kwalletd6 in secret-service mode
+      - name: install + start kwalletd5 in secret-service mode
         if: matrix.os == 'ubuntu-latest' && matrix.ss-provider == 'kwallet'
         run: |
           sudo apt-get update
-          sudo apt-get install -y kwalletmanager kwalletd6 libsecret-1-0 dbus-x11
+          # kwalletd6 isn't packaged on noble; kwalletd5 is the available
+          # SS provider. The Secret Service API surface is the same.
+          sudo apt-get install -y kwalletd5 libsecret-1-0 dbus-x11
           eval $(dbus-launch --sh-syntax)
-          kwalletd6 --secret-service &
+          kwalletd5 --secret-service &
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> $GITHUB_ENV
 
       - name: integration tests
@@ -155,10 +157,15 @@ jobs:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v6
+      # GitHub Actions disallows checkout outside the workspace; CI
+      # checks out the testenv-providing sibling repo at
+      # $GITHUB_WORKSPACE/go-activesync and brings up the docker stack
+      # below directly. Local devs use `make e2e` which expects the
+      # sibling at ../go-activesync (override with GO_ACTIVESYNC_DIR).
       - uses: actions/checkout@v6
         with:
           repository: hstern/go-activesync
-          path: ../go-activesync
+          path: go-activesync
 
       - uses: actions/setup-go@v6
         with:
@@ -167,7 +174,7 @@ jobs:
           cache: true
 
       - name: bring up testenv
-        working-directory: ../go-activesync/testenv
+        working-directory: go-activesync/testenv
         run: |
           docker compose up --build -d
           for i in $(seq 1 90); do
@@ -186,12 +193,12 @@ jobs:
 
       - name: container logs on failure
         if: failure()
-        working-directory: ../go-activesync/testenv
+        working-directory: go-activesync/testenv
         run: docker compose logs
 
       - name: tear down
         if: always()
-        working-directory: ../go-activesync/testenv
+        working-directory: go-activesync/testenv
         run: docker compose down -v
 
   # ------------------------------------------------------------------------
@@ -207,7 +214,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: hstern/go-activesync
-          path: ../go-activesync
+          path: go-activesync
 
       - uses: actions/setup-go@v6
         with:
@@ -216,7 +223,7 @@ jobs:
           cache: true
 
       - name: bring up testenv
-        working-directory: ../go-activesync/testenv
+        working-directory: go-activesync/testenv
         run: |
           docker compose up --build -d
           for i in $(seq 1 90); do
@@ -230,10 +237,10 @@ jobs:
 
       - name: container logs on failure
         if: failure()
-        working-directory: ../go-activesync/testenv
+        working-directory: go-activesync/testenv
         run: docker compose logs
 
       - name: tear down
         if: always()
-        working-directory: ../go-activesync/testenv
+        working-directory: go-activesync/testenv
         run: docker compose down -v
