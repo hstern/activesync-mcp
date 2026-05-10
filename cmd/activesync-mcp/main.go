@@ -80,6 +80,18 @@ func runServe(argv []string, configPath *string, stderr *os.File) int {
 	if err := fs.Parse(argv); err != nil {
 		return exitUsageErr
 	}
+
+	// Install the signal trap as early as possible — before any I/O —
+	// so a Ctrl+C during startup translates into ctx-cancel rather
+	// than the default kill-on-SIGINT runtime behaviour. Slow
+	// machines or busy networks can take seconds to load config / open
+	// bbolt / build the manager, and a user impatient enough to hit
+	// Ctrl+C during that window deserves a clean exit, not a SIGINT
+	// trap that hasn't been wired yet.
+	ctx, cancel := signal.NotifyContext(context.Background(),
+		os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "activesync-mcp: %v\n", err)
@@ -99,10 +111,6 @@ func runServe(argv []string, configPath *string, stderr *os.File) int {
 		return exitConfig
 	}
 	srv := server.Build(cfg, mgr)
-
-	ctx, cancel := signal.NotifyContext(context.Background(),
-		os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	push := server.NewPushController(cfg, mgr, srv)
 	defer push.Close()
@@ -126,7 +134,7 @@ func hostnameSeed() string {
 }
 
 func printUsage(w *os.File) {
-	fmt.Fprintf(w, `activesync-mcp — MCP server bridging Claude to ActiveSync (Z-Push, SOGo)
+	fmt.Fprintf(w, `activesync-mcp — MCP server exposing email, calendar, contacts, tasks, and notes via ActiveSync
 
 Usage:
   activesync-mcp [serve] [--config PATH]
