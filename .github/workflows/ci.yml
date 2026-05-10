@@ -164,13 +164,10 @@ jobs:
   # Tier 2 — integration tests against real OS surfaces (keyring, bbolt,
   # signals, CLI subcommands). Cross-platform.
   #
-  # Linux runs against gnome-keyring as the D-Bus Secret Service provider.
-  # KWallet implements the same Secret Service API and would, in
-  # principle, slot in as another matrix entry — but neither kwalletd5
-  # nor kwalletd6 ships as a top-level package on the GitHub Actions
-  # ubuntu-latest (24.04 noble) runners after the KF6 reorg, so the
-  # kwallet leg is currently disabled. See task list for follow-up
-  # (build kwalletd in a Docker layer, or run a sidecar container).
+  # Linux runs against gnome-keyring here; the kwallet leg lives in
+  # `integration-kwallet` below because Ubuntu noble (the runner image)
+  # doesn't ship a kwalletd binary, so that leg runs inside an Arch
+  # container instead.
   # ------------------------------------------------------------------------
   integration:
     strategy:
@@ -231,6 +228,95 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./junit-integration.xml
           flags: integration,${{ matrix.os }}
+          fail_ci_if_error: false
+
+  # ------------------------------------------------------------------------
+  # Tier 2 (kwallet) — same integration suite, but with kwalletd6 as the
+  # D-Bus Secret Service provider instead of gnome-keyring.
+  #
+  # gnome-keyring and kwalletd6 implement the same Secret Service spec but
+  # differ in collection/attribute handling and prompt-on-locked behavior;
+  # both are common in the wild on Linux desktops, so we run the keyring
+  # leg of the suite under each.
+  #
+  # Runs in an `archlinux:latest` container because Ubuntu noble (the host
+  # runner) dropped both kwalletd5 and kwalletd6 from its repos after the
+  # KF6 reorg. Arch ships `kwalletd6` as part of the `kwallet` package.
+  # ------------------------------------------------------------------------
+  integration-kwallet:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: install system deps
+        run: |
+          # Refresh the package index and install just what the keyring
+          # tests need: kwallet (provides /usr/bin/kwalletd6), dbus
+          # (session bus), libsecret (Secret Service client side, used
+          # by go-keyring), git (for the checkout action), and the Go
+          # toolchain itself — setup-go's apt path doesn't apply here.
+          pacman -Sy --noconfirm --needed \
+            kwallet dbus libsecret git go base-devel ca-certificates
+
+      - uses: actions/checkout@v6
+
+      - name: start dbus session + kwalletd6
+        run: |
+          # GitHub Actions doesn't give the container a session bus by
+          # default; spin one up. dbus-launch returns the address +
+          # process id; export the address so kwalletd6 (and the test
+          # binary it talks to) can find it.
+          eval "$(dbus-launch --sh-syntax)"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+
+          # `--secret-service` makes kwalletd6 register on the bus as
+          # org.freedesktop.secrets — the Secret Service interface
+          # zalando/go-keyring uses. With no existing wallet the
+          # daemon creates an empty default one without prompting.
+          # `--pam-login` is intentionally omitted; we don't have a
+          # PAM context here.
+          kwalletd6 --secret-service &
+          # Give the daemon a moment to register on the bus before
+          # the first test call. The Go test process polls for it
+          # via the Secret Service interface either way, but a 1s
+          # head start keeps the first test from racing the daemon.
+          sleep 1
+
+      - name: install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
+      - name: integration tests
+        run: |
+          # The Arch container puts go-installed binaries in
+          # ~/go/bin which isn't on PATH by default in non-login
+          # shells.
+          export PATH="$HOME/go/bin:$PATH"
+          gotestsum \
+            --junitfile junit-integration.xml \
+            --junitfile-project-name=activesync-mcp \
+            --junitfile-testsuite-name=short \
+            --junitfile-testcase-classname=short \
+            -- -tags integration -count=1 -timeout 5m ./...
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-integration-kwallet
+          path: junit-integration.xml
+          if-no-files-found: error
+
+      # Codecov flag matches the gnome-keyring leg's pattern:
+      # "integration" aggregates across legs, the leg-specific flag
+      # ("kwallet") slices for per-provider flake tracking. We use
+      # "kwallet" rather than "ubuntu-latest" because the gnome-keyring
+      # leg already owns that OS slot on the Tests page.
+      - uses: codecov/test-results-action@v1
+        if: ${{ !cancelled() }}
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./junit-integration.xml
+          flags: integration,kwallet
           fail_ci_if_error: false
 
   # ------------------------------------------------------------------------
