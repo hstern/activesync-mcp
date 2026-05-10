@@ -278,68 +278,126 @@ jobs:
         # repo with mismatched ownership.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: start dbus session + ksecretd
+      - name: probe kwallet CLI surface
+        # Find any prompt-suppression flag on ksecretd / kwallet-query
+        # before we try to pre-create the wallet. Pipe stdin so a
+        # rogue daemon prompt can't block the step.
         run: |
-          # GitHub Actions doesn't give the container a session bus by
-          # default; spin one up. dbus-launch returns the address +
-          # process id; export the address so the daemon and the test
-          # binary that talks to it can find it.
+          echo "--- ksecretd --help ---"
+          ksecretd --help </dev/null 2>&1 | head -40 || true
+          echo "--- kwallet-query --help ---"
+          kwallet-query --help </dev/null 2>&1 | head -40 || true
+          echo "--- kwalletd6 --help ---"
+          kwalletd6 --help </dev/null 2>&1 | head -40 || true
+        timeout-minutes: 1
+
+      - name: pre-seed kwallet config + open default wallet
+        # The wallet-creation prompt is what hung the previous run.
+        # Pre-write kwalletrc so kwalletd6 (a) skips the first-use
+        # wizard, (b) uses one default wallet, (c) doesn't auto-close
+        # it. Then start kwalletd6 and ask kwallet-query to open the
+        # wallet — passing the password on stdin (empty line). On a
+        # fresh install kwalletd6 creates an empty wallet protected
+        # by whatever password we hand it; an empty password keeps
+        # the wallet usable headlessly.
+        run: |
+          # Where kwalletrc lives in the container's HOME.
+          mkdir -p ~/.config
+          cat >~/.config/kwalletrc <<'EOF'
+          [Wallet]
+          Close When Idle=false
+          Close on Screensaver=false
+          Default Wallet=kdewallet
+          Enabled=true
+          First Use=false
+          Idle Timeout=10
+          Launch Manager=false
+          Leave Manager Open=false
+          Leave Open=true
+          Prompt on Open=false
+          Use One Wallet=true
+          EOF
+
           eval "$(dbus-launch --sh-syntax)"
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
 
-          # KF6 split Secret Service support out of kwalletd6 into a
-          # separate daemon, ksecretd, which implements the
-          # freedesktop.org Secret Service spec on top of kwallet
-          # storage (and registers org.kde.secretservicecompat plus
-          # org.freedesktop.secrets on the bus). The KF5
-          # `kwalletd5 --secret-service` flag is gone; this is its
-          # replacement.
-          ksecretd >/tmp/ksecretd.log 2>&1 &
-          DAEMON_PID=$!
+          # Start the storage daemon first; ksecretd later just
+          # adapts the SS API onto it. kwalletd6 has no
+          # --secret-service flag in KF6.
+          kwalletd6 >/tmp/kwalletd6.log 2>&1 &
+          KWPID=$!
+          # Give it a moment to register org.kde.kwalletd6.
+          for i in $(seq 1 20); do
+            if dbus-send --session --print-reply \
+                --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+                org.freedesktop.DBus.NameHasOwner string:org.kde.kwalletd6 \
+                2>/dev/null | grep -q "boolean true"; then
+              break
+            fi
+            if ! kill -0 "$KWPID" 2>/dev/null; then
+              echo "::error::kwalletd6 exited"
+              cat /tmp/kwalletd6.log
+              exit 1
+            fi
+            sleep 0.5
+          done
 
-          # Wait for the Secret Service bus name to register. If it
-          # doesn't appear in 10s, surface the daemon's log and fail
-          # the step so the keyring tests don't silently skip with
-          # "OS keyring unreachable".
+          # `kwallet-query --list-entries kdewallet` triggers wallet
+          # creation/open. Feed empty password on stdin so the prompt
+          # (if any) returns immediately. If kwalletd6 prompts via Qt
+          # GUI instead of stdin we'll see the step time out.
+          # Use timeout(1) as a hard cap so the whole job doesn't
+          # eat the 15-minute budget on a stuck prompt.
+          timeout 30 kwallet-query --list-entries kdewallet </dev/null \
+            >/tmp/kwallet-query.log 2>&1 || {
+              echo "::warning::kwallet-query open returned non-zero; log:"
+              cat /tmp/kwallet-query.log
+              cat /tmp/kwalletd6.log
+            }
+        timeout-minutes: 2
+
+      - name: start ksecretd + bootstrap default collection
+        run: |
+          ksecretd >/tmp/ksecretd.log 2>&1 &
+          KSPID=$!
           for i in $(seq 1 20); do
             if dbus-send --session --print-reply --dest=org.freedesktop.DBus \
                 /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner \
                 string:org.freedesktop.secrets 2>/dev/null \
                 | grep -q "boolean true"; then
-              echo "ksecretd registered on the Secret Service bus name"
-              exit 0
+              echo "ksecretd registered on org.freedesktop.secrets"
+              break
             fi
-            if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
-              echo "::error::ksecretd exited before registering"
-              cat /tmp/ksecretd.log || true
+            if ! kill -0 "$KSPID" 2>/dev/null; then
+              echo "::error::ksecretd exited"
+              cat /tmp/ksecretd.log
               exit 1
             fi
             sleep 0.5
           done
-          echo "::error::ksecretd did not register on the bus within 10s"
-          cat /tmp/ksecretd.log || true
-          exit 1
 
-      - name: bootstrap default Secret Service collection
-        # ksecretd registers on the bus but doesn't create the
-        # `default` collection alias the Secret Service spec defines
-        # — without it, zalando/go-keyring's first call back fails
-        # with "Alias default does not exist" and our keyring tests
-        # silently skip with "OS keyring unreachable". secret-tool
-        # store calls CreateCollection internally and forces the
-        # default alias to be wired up.
-        run: |
-          # secret-tool reads the secret value from stdin. The label
-          # and the schema attributes don't matter; we delete the
-          # entry on the next line. The point is the side effect.
-          printf 'init' | secret-tool store --label=init init init
-          secret-tool clear init init
-          # Confirm: the default alias should now resolve.
+          # CreateCollection with alias=default forces the alias.
+          # Pass empty Properties dict; ksecretd should reuse the
+          # already-open kwallet. `timeout 30` so a stuck prompt
+          # fails fast instead of eating the job budget.
+          timeout 30 dbus-send --session --print-reply \
+            --dest=org.freedesktop.secrets \
+            /org/freedesktop/secrets \
+            org.freedesktop.Secret.Service.CreateCollection \
+            "dict:string:variant:" \
+            string:default \
+            >/tmp/createcoll.log 2>&1 || {
+              echo "::warning::CreateCollection failed:"
+              cat /tmp/createcoll.log
+            }
+
+          # Final probe: does ReadAlias("default") resolve?
           dbus-send --session --print-reply \
             --dest=org.freedesktop.secrets \
             /org/freedesktop/secrets \
             org.freedesktop.Secret.Service.ReadAlias string:default \
-            | head -5
+            2>&1 | head -5
+        timeout-minutes: 2
 
       - name: install gotestsum
         run: go install gotest.tools/gotestsum@latest
