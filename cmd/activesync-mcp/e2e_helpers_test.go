@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"activesync-mcp/lib/server"
 )
 
 var (
@@ -226,6 +228,108 @@ func escapeTOMLE2E(s string) string {
 // timeout. Used by cleanup paths after t.Context() is already done.
 func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), d)
+}
+
+// findInboxID lists email folders and returns the Inbox's server ID.
+func findInboxID(t *testing.T, cs *mcp.ClientSession) string {
+	t.Helper()
+	var out server.EmailListFoldersOutput
+	callTool(t, cs, "email_list_folders",
+		server.EmailListFoldersInput{Account: "test"}, &out)
+	for _, f := range out.Folders {
+		if f.Type == "Inbox" {
+			return f.ID
+		}
+	}
+	t.Fatalf("no Inbox folder in %d-folder list", len(out.Folders))
+	return ""
+}
+
+// findFolderByType returns the first folder of the given type
+// (SentItems, Drafts, DeletedItems, etc.). Returns "" if none.
+func findFolderByType(t *testing.T, cs *mcp.ClientSession, want string) string {
+	t.Helper()
+	var out server.EmailListFoldersOutput
+	callTool(t, cs, "email_list_folders",
+		server.EmailListFoldersInput{Account: "test"}, &out)
+	for _, f := range out.Folders {
+		if f.Type == want {
+			return f.ID
+		}
+	}
+	return ""
+}
+
+// findCalendarFolder returns the default calendar folder's id (the
+// first non-tasks calendar surfaced by Z-Push's BackendCalDAV).
+func findCalendarFolder(t *testing.T, cs *mcp.ClientSession) string {
+	t.Helper()
+	var out server.CalendarListFoldersOutput
+	callTool(t, cs, "calendar_list_folders",
+		server.CalendarListFoldersInput{Account: "test"}, &out)
+	for _, f := range out.Folders {
+		if f.Type == "Calendar" {
+			return f.ID
+		}
+	}
+	t.Fatalf("no Calendar folder in: %+v", out.Folders)
+	return ""
+}
+
+// sendLoopbackEmail sends a message to the testenv user and returns
+// the unique subject that identifies it. Caller polls the inbox to
+// find the resulting message via waitForMessageInInbox.
+func sendLoopbackEmail(t *testing.T, cs *mcp.ClientSession, body string) string {
+	t.Helper()
+	subject := fmt.Sprintf("e2e-%s-%d", t.Name(), time.Now().UnixNano())
+	callTool(t, cs, "email_send", server.EmailSendInput{
+		Account:  "test",
+		To:       []server.EmailAddress{{Address: "integration@asmcp.test"}},
+		Subject:  subject,
+		BodyText: body,
+	}, nil)
+	return subject
+}
+
+// waitForMessageInInbox polls email_list until a message with the
+// given subject appears, or fails the test.
+func waitForMessageInInbox(t *testing.T, cs *mcp.ClientSession, inboxID, subject string) server.EmailRow {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		var out server.EmailListOutput
+		callTool(t, cs, "email_list", server.EmailListInput{
+			Account: "test", FolderID: inboxID, WindowSize: 50,
+		}, &out)
+		for _, e := range out.Items {
+			if e.Subject == subject {
+				return e
+			}
+		}
+		time.Sleep(1 * time.Second)
+	}
+	t.Fatalf("message %q never appeared in Inbox after 20s", subject)
+	return server.EmailRow{}
+}
+
+// mustCallToolBool is a sloppy variant for cleanup paths that
+// fire-and-forget — never fails the test. Uses its own background
+// context because t.Context() is already cancelled by the time
+// t.Cleanup runs.
+func mustCallToolBool(t *testing.T, cs *mcp.ClientSession, name string, args any) bool {
+	t.Helper()
+	ctx, cancel := contextWithTimeout(30 * time.Second)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Logf("cleanup CallTool(%s): %v", name, err)
+		return false
+	}
+	if res.IsError {
+		t.Logf("cleanup CallTool(%s) IsError: %s", name, formatContent(res.Content))
+		return false
+	}
+	return true
 }
 
 // decodeStructured marshal-then-unmarshal-decodes the structured

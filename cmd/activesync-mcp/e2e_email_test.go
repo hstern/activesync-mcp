@@ -6,83 +6,12 @@
 package main
 
 import (
-	"fmt"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"activesync-mcp/lib/server"
 )
-
-// findInboxID lists folders and returns the Inbox's server ID. Most
-// email tests start by needing this; centralised so per-test setup
-// stays small.
-func findInboxID(t *testing.T, cs *mcp.ClientSession) string {
-	t.Helper()
-	var out server.EmailListFoldersOutput
-	callTool(t, cs, "email_list_folders",
-		server.EmailListFoldersInput{Account: "test"}, &out)
-	for _, f := range out.Folders {
-		if f.Type == "Inbox" {
-			return f.ID
-		}
-	}
-	t.Fatalf("no Inbox folder in %d-folder list", len(out.Folders))
-	return ""
-}
-
-// findFolderByType returns the first folder of the given type (Sent,
-// Drafts, DeletedItems, etc.). Returns "" if none.
-func findFolderByType(t *testing.T, cs *mcp.ClientSession, want string) string {
-	t.Helper()
-	var out server.EmailListFoldersOutput
-	callTool(t, cs, "email_list_folders",
-		server.EmailListFoldersInput{Account: "test"}, &out)
-	for _, f := range out.Folders {
-		if f.Type == want {
-			return f.ID
-		}
-	}
-	return ""
-}
-
-// sendLoopbackEmail sends a message to integration@asmcp.test (the
-// testenv user) and returns the unique subject that identifies it.
-// Caller polls the inbox to find the resulting EmailRow.
-func sendLoopbackEmail(t *testing.T, cs *mcp.ClientSession, body string) string {
-	t.Helper()
-	subject := fmt.Sprintf("e2e-%s-%d", t.Name(), time.Now().UnixNano())
-	callTool(t, cs, "email_send", server.EmailSendInput{
-		Account:  "test",
-		To:       []server.EmailAddress{{Address: "integration@asmcp.test"}},
-		Subject:  subject,
-		BodyText: body,
-	}, nil)
-	return subject
-}
-
-// waitForMessageInInbox polls email_list (with windowed re-bootstrap)
-// until a message with the given subject appears, or fails the test.
-func waitForMessageInInbox(t *testing.T, cs *mcp.ClientSession, inboxID, subject string) server.EmailRow {
-	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		var out server.EmailListOutput
-		callTool(t, cs, "email_list", server.EmailListInput{
-			Account: "test", FolderID: inboxID, WindowSize: 50,
-		}, &out)
-		for _, e := range out.Items {
-			if e.Subject == subject {
-				return e
-			}
-		}
-		time.Sleep(1 * time.Second)
-	}
-	t.Fatalf("message %q never appeared in Inbox after 20s", subject)
-	return server.EmailRow{}
-}
 
 func TestE2E_EmailListFolders(t *testing.T) {
 	cs := e2eClient(t)
@@ -276,26 +205,3 @@ func TestE2E_EmailDelete(t *testing.T) {
 	// Don't t.Cleanup deletion — that's the test itself.
 }
 
-// mustCallToolBool is a sloppy variant for cleanup paths that just
-// want to fire-and-forget — it never fails the test. Uses its own
-// background context with a 30s timeout because t.Context() is
-// already cancelled by the time t.Cleanup runs.
-func mustCallToolBool(t *testing.T, cs *mcp.ClientSession, name string, args any) bool {
-	t.Helper()
-	ctx, cancel := contextWithTimeout(30 * time.Second)
-	defer cancel()
-	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
-	if err != nil {
-		t.Logf("cleanup CallTool(%s): %v", name, err)
-		return false
-	}
-	if res.IsError {
-		t.Logf("cleanup CallTool(%s) IsError: %s", name, formatContent(res.Content))
-		return false
-	}
-	return true
-}
-
-// trim is duplicated from the std strings to keep this file's import
-// list manageable; only used in error messages above.
-var _ = strings.TrimSpace

@@ -10,27 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-
 	"activesync-mcp/lib/server"
 )
-
-// findCalendarFolder lists calendar folders and returns the default
-// calendar's id (the first non-tasks calendar surfaced by Z-Push's
-// BackendCalDAV).
-func findCalendarFolder(t *testing.T, cs *mcp.ClientSession) string {
-	t.Helper()
-	var out server.CalendarListFoldersOutput
-	callTool(t, cs, "calendar_list_folders",
-		server.CalendarListFoldersInput{Account: "test"}, &out)
-	for _, f := range out.Folders {
-		if f.Type == "Calendar" {
-			return f.ID
-		}
-	}
-	t.Fatalf("no Calendar folder in: %+v", out.Folders)
-	return ""
-}
 
 func TestE2E_CalendarListFolders(t *testing.T) {
 	cs := e2eClient(t)
