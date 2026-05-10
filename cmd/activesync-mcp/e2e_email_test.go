@@ -204,4 +204,3 @@ func TestE2E_EmailDelete(t *testing.T) {
 	}, nil)
 	// Don't t.Cleanup deletion — that's the test itself.
 }
-
