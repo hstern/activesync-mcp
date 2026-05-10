@@ -320,6 +320,27 @@ jobs:
           cat /tmp/ksecretd.log || true
           exit 1
 
+      - name: bootstrap default Secret Service collection
+        # ksecretd registers on the bus but doesn't create the
+        # `default` collection alias the Secret Service spec defines
+        # — without it, zalando/go-keyring's first call back fails
+        # with "Alias default does not exist" and our keyring tests
+        # silently skip with "OS keyring unreachable". secret-tool
+        # store calls CreateCollection internally and forces the
+        # default alias to be wired up.
+        run: |
+          # secret-tool reads the secret value from stdin. The label
+          # and the schema attributes don't matter; we delete the
+          # entry on the next line. The point is the side effect.
+          printf 'init' | secret-tool store --label=init init init
+          secret-tool clear init init
+          # Confirm: the default alias should now resolve.
+          dbus-send --session --print-reply \
+            --dest=org.freedesktop.secrets \
+            /org/freedesktop/secrets \
+            org.freedesktop.Secret.Service.ReadAlias string:default \
+            | head -5
+
       - name: install gotestsum
         run: go install gotest.tools/gotestsum@latest
 
