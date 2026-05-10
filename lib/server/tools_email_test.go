@@ -6,7 +6,9 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/hstern/go-activesync/eas"
@@ -222,6 +224,140 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// Response-size cap tests. The MCP SDK enforces a 1 MiB ceiling on
+// tool results; our handlers stay under it via:
+//   - email_get: server-side body truncation default + post-marshal
+//     belt-and-suspenders trim of BodyMIME/Body.
+//   - email_list: WindowSize × BodyPreview product is capped before
+//     the EAS request.
+//   - email_search: Limit is capped to a value that keeps the
+//     marshaled response under the budget.
+
+func TestShrinkEmailGetOutput_underBudgetUnchanged(t *testing.T) {
+	out := &EmailGetOutput{
+		ID: "x", Subject: "S", From: "a@b",
+		BodyMIME: strings.Repeat("a", 1024),
+	}
+	original := out.BodyMIME
+	shrinkEmailGetOutput(out)
+	if out.BodyMIME != original {
+		t.Error("payload under budget should not be touched")
+	}
+	if out.BodyTruncated {
+		t.Error("BodyTruncated set when no truncation happened")
+	}
+}
+
+func TestShrinkEmailGetOutput_overBudgetTrimsBodyMIME(t *testing.T) {
+	// 2 MiB of binary-ish content: well over the cap.
+	huge := strings.Repeat("Z", 2_000_000)
+	out := &EmailGetOutput{
+		ID: "x", Subject: "S",
+		BodyMIME: huge,
+	}
+	shrinkEmailGetOutput(out)
+	if marshaledSize(out) > maxResponseBytes {
+		t.Errorf("after shrink, size = %d > cap %d", marshaledSize(out), maxResponseBytes)
+	}
+	if !out.BodyTruncated {
+		t.Error("BodyTruncated should be set after shrinking")
+	}
+	if !strings.Contains(out.BodyMIME, "truncated") && out.BodyMIME != "" {
+		t.Errorf("expected truncation marker in BodyMIME, got prefix: %q", out.BodyMIME[:min(80, len(out.BodyMIME))])
+	}
+}
+
+func TestShrinkEmailGetOutput_overBudgetWithBodyOnly(t *testing.T) {
+	// Same scenario but the bulk lives in Body (parsed plain) not
+	// BodyMIME — verifies the trim handles either field.
+	huge := strings.Repeat("Y", 2_000_000)
+	out := &EmailGetOutput{
+		ID: "x", Subject: "S",
+		BodyType: "plain",
+		Body:     huge,
+	}
+	shrinkEmailGetOutput(out)
+	if marshaledSize(out) > maxResponseBytes {
+		t.Errorf("after shrink, size = %d > cap", marshaledSize(out))
+	}
+	if !out.BodyTruncated {
+		t.Error("BodyTruncated should be set")
+	}
+}
+
+func TestEmailList_capsWindowSize(t *testing.T) {
+	// Caller asks for 1000 items × 4 KiB previews = 4 MiB. Handler
+	// must shrink WindowSize so the EAS request stays under the
+	// payload budget.
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			SyncEmailFunc: func(_ context.Context, _ string, opts eas.EmailSyncOptions) (*eas.EmailSyncResult, error) {
+				if opts.WindowSize > 700_000/4096+1 {
+					t.Errorf("WindowSize=%d not capped (would request ~%d KiB of previews)",
+						opts.WindowSize, opts.WindowSize*opts.BodyTruncationSize/1024)
+				}
+				return &eas.EmailSyncResult{SyncKey: "S"}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+	callTool(t, s, "email_list", EmailListInput{
+		Account: "alpha", FolderID: "i",
+		WindowSize: 1000, BodyPreview: 4096,
+	})
+}
+
+func TestEmailSearch_capsLimit(t *testing.T) {
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			SearchEmailFunc: func(_ context.Context, _ string, opts eas.EmailSearchOptions) (*eas.EmailSearchResult, error) {
+				// Range like "0-N" — verify N+1 (= effective limit)
+				// doesn't exceed the cap.
+				var start, end int
+				if _, err := fmt.Sscanf(opts.Range, "%d-%d", &start, &end); err != nil {
+					t.Fatalf("Range = %q (parse: %v)", opts.Range, err)
+				}
+				if end-start+1 > 700 {
+					t.Errorf("limit=%d not capped (Range=%q)", end-start+1, opts.Range)
+				}
+				return &eas.EmailSearchResult{Range: opts.Range}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+	callTool(t, s, "email_search", EmailSearchInput{
+		Account: "alpha", Query: "x", Limit: 10_000,
+	})
+}
+
+func TestEmailGet_defaultsBodyTruncation(t *testing.T) {
+	// MaxBytes=0 should be replaced with the server-side default so
+	// the EAS request asks for a bounded body, not the full thing.
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			FetchEmailFunc: func(_ context.Context, _, _ string, opts eas.FetchEmailOptions) (*eas.EmailItem, error) {
+				if opts.BodyTruncationSize == 0 {
+					t.Errorf("BodyTruncationSize=0; should default to %d", defaultBodyBytes)
+				}
+				if opts.BodyTruncationSize > defaultBodyBytes {
+					t.Errorf("BodyTruncationSize=%d > default cap %d", opts.BodyTruncationSize, defaultBodyBytes)
+				}
+				return &eas.EmailItem{ServerID: "x", Subject: "S"}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+	callTool(t, s, "email_get", EmailGetInput{
+		Account: "alpha", FolderID: "i", ID: "x",
+	})
 }
 
 // Error-wrap tests for the read-side handlers.

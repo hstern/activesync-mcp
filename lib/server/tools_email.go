@@ -154,6 +154,23 @@ func registerEmailList(s *mcp.Server, m *Manager, accounts []string) {
 		if in.BodyPreview == 0 {
 			opts.BodyTruncationSize = 1024
 		}
+		// Cap WindowSize × BodyPreview at ~700 KiB so a caller asking
+		// for 512 items with 4 KiB previews each can't blow past the
+		// MCP result limit. We prefer trimming WindowSize because
+		// shorter previews are usually less useful to a model than
+		// fewer-but-richer items.
+		if opts.WindowSize == 0 {
+			opts.WindowSize = 50
+		}
+		if opts.BodyTruncationSize == 0 {
+			opts.BodyTruncationSize = 1024
+		}
+		if opts.WindowSize*opts.BodyTruncationSize > 700_000 {
+			opts.WindowSize = 700_000 / opts.BodyTruncationSize
+			if opts.WindowSize < 1 {
+				opts.WindowSize = 1
+			}
+		}
 		res, err := c.SyncEmail(ctx, in.FolderID, opts)
 		if err != nil {
 			return nil, EmailListOutput{}, fmt.Errorf("SyncEmail: %w", err)
@@ -257,9 +274,16 @@ func registerEmailGet(s *mcp.Server, m *Manager, accounts []string) {
 			return nil, EmailGetOutput{}, err
 		}
 		bt, btName := parseFormat(in.Format)
+		// Apply a default body cap when the caller didn't specify
+		// one, so a single message with attachments doesn't blow
+		// past the MCP 1 MiB result limit.
+		max := in.MaxBytes
+		if max <= 0 || max > defaultBodyBytes {
+			max = defaultBodyBytes
+		}
 		item, err := c.FetchEmail(ctx, in.FolderID, in.ID, eas.FetchEmailOptions{
 			BodyType:           bt,
-			BodyTruncationSize: in.MaxBytes,
+			BodyTruncationSize: max,
 		})
 		if err != nil {
 			return nil, EmailGetOutput{}, fmt.Errorf("FetchEmail: %w", err)
@@ -284,8 +308,63 @@ func registerEmailGet(s *mcp.Server, m *Manager, accounts []string) {
 		if len(item.BodyMIME) > 0 {
 			out.BodyMIME = string(item.BodyMIME)
 		}
+		// Belt-and-suspenders: even with a server-side cap, JSON
+		// escaping (especially for binary in 8bit MIME parts) can
+		// inflate the payload past the budget. Trim the bulkiest
+		// field client-side and flag it.
+		shrinkEmailGetOutput(&out)
 		return jsonResult(out)
 	})
+}
+
+// shrinkEmailGetOutput trims body fields in place when the marshaled
+// payload would exceed maxResponseBytes. We trim BodyMIME first
+// (raw + base64-attachment-heavy), then Body, marking BodyTruncated.
+// The truncation is destructive and rounds down — callers that need
+// the full content should re-call with a smaller MaxBytes or pull
+// attachments via a future email_get_attachment tool.
+func shrinkEmailGetOutput(out *EmailGetOutput) {
+	for {
+		if marshaledSize(out) <= maxResponseBytes {
+			return
+		}
+		switch {
+		case len(out.BodyMIME) > 4096:
+			out.BodyMIME = truncateString(out.BodyMIME, len(out.BodyMIME)/2)
+			out.BodyTruncated = true
+		case len(out.Body) > 4096:
+			out.Body = truncateString(out.Body, len(out.Body)/2)
+			out.BodyTruncated = true
+		case len(out.BodyMIME) > 0:
+			out.BodyMIME = ""
+			out.BodyTruncated = true
+		case len(out.Body) > 0:
+			out.Body = ""
+			out.BodyTruncated = true
+		default:
+			// Nothing left to trim. The caller's metadata alone
+			// exceeds the budget — should never happen in practice.
+			return
+		}
+	}
+}
+
+func marshaledSize[T any](v T) int {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return 0
+	}
+	return len(b)
+}
+
+func truncateString(s string, n int) string {
+	if n < 0 {
+		n = 0
+	}
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "\n…[truncated by activesync-mcp to fit MCP result size limit]"
 }
 
 func parseFormat(s string) (eas.BodyType, string) {
@@ -336,6 +415,15 @@ func registerEmailSearch(s *mcp.Server, m *Manager, accounts []string) {
 		if limit <= 0 {
 			limit = 50
 		}
+		// Search returns body previews bounded by the EAS server's
+		// default truncation; with hundreds of hits this can blow
+		// past the MCP result limit. Cap so the request can't ask
+		// for more than ~700 items at once. (Each item is metadata
+		// + ~256B body preview by default = ~1 KiB; 700 items =
+		// ~700 KiB, leaving headroom for envelope.)
+		if limit > 700 {
+			limit = 700
+		}
 		offset := max(in.Offset, 0)
 		end := offset + limit - 1
 		rangeStr := fmt.Sprintf("%d-%d", offset, end)
@@ -383,6 +471,19 @@ func scopeEnum(t *mcp.Tool, _ string, allowed []string) {
 		t.Description = hint
 	}
 }
+
+// maxResponseBytes is the soft cap on a single tool result. The MCP
+// SDK enforces a hard 1 MiB ceiling; we stay under it with headroom
+// for envelope + JSON encoding overhead so handler-side caps can use
+// the budget meaningfully.
+const maxResponseBytes = 900_000
+
+// defaultBodyBytes is the server-side body truncation we ask EAS for
+// when the caller didn't specify one. Empirically: a typical inbox
+// message with no attachments is < 50 KiB; 700 KiB leaves room for
+// inline images and quoted threads while staying well under
+// maxResponseBytes after JSON encoding overhead.
+const defaultBodyBytes = 700_000
 
 func jsonResult[T any](v T) (*mcp.CallToolResult, T, error) {
 	body, err := json.MarshalIndent(v, "", "  ")
