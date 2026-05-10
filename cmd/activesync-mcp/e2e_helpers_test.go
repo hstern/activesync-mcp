@@ -1,12 +1,13 @@
 // Copyright (C) 2026 Henry Stern
 // SPDX-License-Identifier: MIT
 
-//go:build e2e
+//go:build e2e || scenario
 
-// Tier 3 end-to-end test helpers: spawn the activesync-mcp binary as a
-// subprocess and connect to it as an MCP client over stdio. Each
-// test gets a fresh bbolt state dir so reruns don't accumulate sync
-// keys.
+// End-to-end test helpers shared by Tier 3 (single-tool roundtrips,
+// `e2e` tag) and Tier 4 (multi-call agent flows, `scenario` tag).
+// Spawns the activesync-mcp binary as a subprocess and connects to
+// it as an MCP client over stdio. Each test gets a fresh bbolt state
+// dir so reruns don't accumulate sync keys.
 //
 // The shared binary is built once per test process (sync.Once) — the
 // per-test cost is just `cmd.Start()` + the MCP handshake.

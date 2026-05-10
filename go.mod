@@ -5,7 +5,7 @@ go 1.26.2
 require (
 	github.com/Azure/go-ntlmssp v0.1.1
 	github.com/BurntSushi/toml v1.6.0
-	github.com/hstern/go-activesync v0.2.0
+	github.com/hstern/go-activesync v0.2.1
 	github.com/jcmturner/gokrb5/v8 v8.4.4
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78
