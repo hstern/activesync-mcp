@@ -391,7 +391,7 @@ type EmailSearchInput struct {
 	FolderID      string `json:"folder_id,omitempty" jsonschema:"restrict to a single folder; empty searches all folders"`
 	DeepTraversal bool   `json:"deep_traversal,omitempty" jsonschema:"include subfolders when folder_id is set"`
 	Limit         int    `json:"limit,omitempty" jsonschema:"max hits to return (default 50)"`
-	Offset        int    `json:"offset,omitempty" jsonschema:"skip this many initial hits (default 0)"`
+	Offset        int    `json:"offset,omitempty" jsonschema:"skip this many initial hits (default 0). NOTE: many EAS servers silently ignore this and always return the first window — see the tool description for the recommended workaround."`
 }
 
 // EmailSearchOutput wraps the matched rows + the server's range/total.
@@ -405,7 +405,21 @@ func registerEmailSearch(s *mcp.Server, m *Manager, accounts []string) {
 	tool := &mcp.Tool{
 		Name: "email_search",
 		Description: "Server-side full-text search of mail. " +
-			"Returns matched messages with metadata + a short preview.",
+			"Returns matched messages with metadata + a short preview. " +
+			"\n\nKNOWN LIMITATIONS (server-side, EAS protocol): " +
+			"(1) Result ordering is server-determined and is typically " +
+			"date-ascending (oldest first). MS-ASCMD §2.2.3.151 does not " +
+			"define a Sort element for Search, so there is no protocol " +
+			"knob to flip this. " +
+			"(2) The `offset` parameter is sent on the wire (and the server " +
+			"echoes it back in `range`) but many EAS servers silently ignore " +
+			"it and always return the first window of results. If items at " +
+			"`offset > 0` look identical to `offset == 0`, the server is " +
+			"ignoring the parameter — there is no client-side fix. " +
+			"\nWORKAROUND for finding recent matches: use `email_list` with " +
+			"a `date_window` against the target folder (e.g. Inbox) and " +
+			"paginate via `cursor`. This loses full-text filtering but " +
+			"orders newest-first and respects pagination on every server.",
 	}
 	scopeEnum(tool, "account", accounts)
 
