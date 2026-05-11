@@ -46,12 +46,12 @@ func TestE2E_FirstRunSequence(t *testing.T) {
 	body := fmt.Sprintf(`state_dir = %q
 [[account]]
 name             = "test"
-server_url       = "http://localhost:8580/Microsoft-Server-ActiveSync"
+server_url       = %q
 username         = "integration"
 as_version       = "14.0"
 secret           = { keyring_service = %q, keyring_account = %q }
 default_access   = "rw"
-`, escapeTOMLE2E(stateDir), svc, acct)
+`, escapeTOMLE2E(stateDir), e2eServerURL(), svc, acct)
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

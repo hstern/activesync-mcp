@@ -39,7 +39,7 @@ func TestE2E_DoctorReportsAuthFailure(t *testing.T) {
 	body := `state_dir = "` + escapeTOMLE2E(stateDir) + `"
 [[account]]
 name = "test"
-server_url = "http://localhost:8580/Microsoft-Server-ActiveSync"
+server_url = "` + e2eServerURL() + `"
 username = "integration"
 secret = { command = ["printf", "%s", "wrong-password"] }
 `

@@ -91,7 +91,7 @@ func writeMultiAccountConfig(t *testing.T, stateDir, alphaName, betaName string)
 	t.Helper()
 	const accountTpl = `[[account]]
 name             = %q
-server_url       = "http://localhost:8580/Microsoft-Server-ActiveSync"
+server_url       = %q
 username         = "integration"
 device_type      = "GoActiveSyncTest"
 as_version       = "14.0"
@@ -99,10 +99,11 @@ secret           = { command = ["printf", "%%s", "integration"] }
 default_access   = "rw"
 
 `
+	url := e2eServerURL()
 	body := fmt.Sprintf("state_dir = %q\nlog_level = \"info\"\n\n",
 		escapeTOMLE2E(stateDir)) +
-		fmt.Sprintf(accountTpl, alphaName) +
-		fmt.Sprintf(accountTpl, betaName)
+		fmt.Sprintf(accountTpl, alphaName, url) +
+		fmt.Sprintf(accountTpl, betaName, url)
 	cfgPath := filepath.Join(t.TempDir(), "multiaccount.toml")
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
