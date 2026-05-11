@@ -75,10 +75,24 @@ func (p *PushController) Close() {
 	p.cancels = nil
 }
 
+// pingStatusFolderHierarchyOutOfDate is MS-ASCMD §2.2.3.66's Status 7
+// — the client's view of the folder hierarchy is stale and Ping must
+// be retried after a fresh FolderSync. Z-Push's BackendCombined fires
+// it reliably on the first Ping after a cold-boot FolderSync; other
+// servers fire it whenever another client adds or removes a folder
+// under us.
+const pingStatusFolderHierarchyOutOfDate = 7
+
 // watchAccount runs the per-account Ping loop until ctx is cancelled.
 // It expands subscribed folders by calling FolderSync once at startup,
 // then loops Ping calls. On any error, it backs off briefly before
 // retrying so a transient network blip doesn't tight-loop.
+//
+// Status=7 (FolderHierarchyOutOfDate) is special-cased: re-FolderSync,
+// re-subscribe, retry the Ping immediately. The recovery is allowed
+// once per backoff cycle so a server that keeps returning Status=7
+// can't pin us in a tight loop — repeated Status=7s fall through to
+// the normal backoff path.
 func (p *PushController) watchAccount(ctx context.Context, accountName string) {
 	logger := p.logger.With("account", accountName)
 	logger.Info("push watcher starting")
@@ -103,6 +117,7 @@ func (p *PushController) watchAccount(ctx context.Context, accountName string) {
 
 	heartbeat := int(p.heartbeat / time.Second)
 	backoff := 2 * time.Second
+	recoveredHierarchy := false
 
 	for {
 		select {
@@ -116,6 +131,17 @@ func (p *PushController) watchAccount(ctx context.Context, accountName string) {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
+			if res != nil && res.Status == pingStatusFolderHierarchyOutOfDate && !recoveredHierarchy {
+				logger.Info("push watcher: hierarchy stale; re-FolderSyncing")
+				refreshed, ferr := p.subscribedFolders(ctx, c)
+				if ferr == nil && len(refreshed) > 0 {
+					folders = refreshed
+					recoveredHierarchy = true
+					logger.Info("push watcher: re-subscribed", "folders", len(folders))
+					continue
+				}
+				logger.Warn("push watcher: hierarchy refresh failed", "err", ferr, "folders", len(refreshed))
+			}
 			logger.Warn("push watcher: ping error", "err", err, "backoff", backoff)
 			select {
 			case <-ctx.Done():
@@ -128,6 +154,7 @@ func (p *PushController) watchAccount(ctx context.Context, accountName string) {
 			continue
 		}
 		backoff = 2 * time.Second
+		recoveredHierarchy = false
 
 		if res.Status == 2 && len(res.ChangedFolders) > 0 {
 			for _, fid := range res.ChangedFolders {

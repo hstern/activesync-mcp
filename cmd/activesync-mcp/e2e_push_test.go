@@ -83,20 +83,21 @@ default_access   = "rw"
 	// delivery + the controller's reaction can easily take 30-60s end
 	// to end on a cold testenv.
 	//
-	// Z-Push BackendCombined returns Status=7 (FolderHierarchyOutOfDate)
-	// on the first Ping after a cold-boot FolderSync. lib/server/push.go
-	// then backs off exponentially without recovering — fix tracked at
-	// hstern/activesync-mcp#1. Upstream Z-Push side at
-	// hstern/go-activesync#3.
-	//
-	// Skip rather than Fail until the watcher learns to re-FolderSync;
-	// this still validates the MCP push boundary (subscription wires up,
-	// stderr shows the watcher running) without making the e2e suite
-	// red on a known-and-tracked issue.
+	// The push.go Status=7 (FolderHierarchyOutOfDate) recovery landed
+	// as part of hstern/activesync-mcp#1 — verified by the unit test
+	// TestPushController_recoversFromHierarchyOutOfDate. End-to-end
+	// notification still doesn't reliably arrive within the test
+	// window because Z-Push's BackendIMAP returns rapid Status=1 Pings
+	// without long-polling Dovecot's IDLE channel; new inbound mail
+	// only surfaces on the next IMAP polling tick. That's an upstream
+	// reliability issue (hstern/go-activesync#3), not a defect in our
+	// watcher. Skip rather than Fail until Z-Push push reliability is
+	// addressed; the test still validates the MCP push boundary
+	// (subscription wires up, stderr shows the watcher running).
 	select {
 	case params := <-notified:
 		t.Logf("notification: %+v", params)
 	case <-time.After(75 * time.Second):
-		t.Skip("no notifications within 75s — see hstern/activesync-mcp#1")
+		t.Skip("no notifications within 75s — see hstern/go-activesync#3 (Z-Push IMAP push reliability)")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,12 +21,17 @@ import (
 )
 
 // pushFakeServer responds to Provision, FolderSync (returning an inbox),
-// and Ping (returning Status=2 with the inbox marked changed). The
-// goroutine should fan out a notification at least once.
+// and Ping. By default Ping returns Status=2 with the inbox marked
+// changed. If pingStatusSequence is non-empty the i-th Ping returns
+// the i-th status code (clamped to the last entry once the sequence
+// is exhausted) — used by the Status=7 recovery test.
 type pushFakeServer struct {
-	mu        sync.Mutex
-	provCalls int
-	pingCalls int32
+	mu                 sync.Mutex
+	provCalls          int
+	pingCalls          int32
+	fsCalls            int32
+	pingStatusSequence []int
+	pingTimes          []time.Time
 }
 
 func (f *pushFakeServer) handle(w http.ResponseWriter, r *http.Request) {
@@ -63,6 +69,7 @@ func (f *pushFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
 		w.Write(b)
 	case "FolderSync":
+		atomic.AddInt32(&f.fsCalls, 1)
 		doc := &wbxml.Document{
 			Root: wbxml.E(wbxml.PageFolderHierarchy, "FolderSync",
 				wbxml.E(wbxml.PageFolderHierarchy, "Status", wbxml.Text("1")),
@@ -81,20 +88,32 @@ func (f *pushFakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
 		w.Write(b)
 	case "Ping":
-		atomic.AddInt32(&f.pingCalls, 1)
-		// Status 2 = changes available on inbox-1.
-		doc := &wbxml.Document{
-			Root: wbxml.E(wbxml.PagePing, "Ping",
-				wbxml.E(wbxml.PagePing, "Status", wbxml.Text("2")),
-				wbxml.E(wbxml.PagePing, "Folders",
-					wbxml.E(wbxml.PagePing, "Folder",
-						wbxml.E(wbxml.PagePing, "Id", wbxml.Text("inbox-1")),
-						wbxml.E(wbxml.PagePing, "Class", wbxml.Text("Email")),
-					),
-				),
-			),
+		n := atomic.AddInt32(&f.pingCalls, 1)
+		f.mu.Lock()
+		f.pingTimes = append(f.pingTimes, time.Now())
+		status := 2
+		if len(f.pingStatusSequence) > 0 {
+			idx := int(n) - 1
+			if idx >= len(f.pingStatusSequence) {
+				idx = len(f.pingStatusSequence) - 1
+			}
+			status = f.pingStatusSequence[idx]
 		}
-		b, _ := wbxml.Marshal(doc, wbxml.DefaultRegistry())
+		f.mu.Unlock()
+		root := wbxml.E(wbxml.PagePing, "Ping",
+			wbxml.E(wbxml.PagePing, "Status", wbxml.Text(strconv.Itoa(status))),
+		)
+		// Status 2 (changes) carries the changed-folder list. Other
+		// statuses (1=no changes, 7=hierarchy stale, …) don't.
+		if status == 2 {
+			root.Children = append(root.Children, wbxml.E(wbxml.PagePing, "Folders",
+				wbxml.E(wbxml.PagePing, "Folder",
+					wbxml.E(wbxml.PagePing, "Id", wbxml.Text("inbox-1")),
+					wbxml.E(wbxml.PagePing, "Class", wbxml.Text("Email")),
+				),
+			))
+		}
+		b, _ := wbxml.Marshal(&wbxml.Document{Root: root}, wbxml.DefaultRegistry())
 		w.Write(b)
 	default:
 		http.Error(w, "unhandled "+r.URL.Query().Get("Cmd"), 400)
@@ -144,6 +163,69 @@ func TestPushController_notifiesOnChanges(t *testing.T) {
 	push.Close()
 	if atomic.LoadInt32(&f.pingCalls) == 0 {
 		t.Error("Ping was never called")
+	}
+}
+
+func TestPushController_recoversFromHierarchyOutOfDate(t *testing.T) {
+	// First Ping returns Status=7 (FolderHierarchyOutOfDate), the rest
+	// return Status=2 (changes available). The watcher must re-FolderSync
+	// and immediately retry the Ping — without sleeping the 2s minimum
+	// backoff. We assert that by measuring the gap between the first
+	// and second Ping plus checking that FolderSync ran twice (initial
+	// + recovery).
+	f := &pushFakeServer{pingStatusSequence: []int{7, 2}}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Accounts: []config.Account{{
+			Name:          "alpha",
+			ServerURL:     srv.URL,
+			Username:      "u",
+			ASVersion:     "14.1",
+			DefaultAccess: config.AccessRO,
+			Push:          true,
+			Secret:        config.SecretRef{KeyringService: "x", KeyringAccount: "alpha"},
+		}},
+	}
+	res := &fakeResolver{pw: map[string]string{"alpha": "p"}}
+	mgr := NewManager(cfg, &fakeStateProvider{}, res, staticDeviceIDs{"alpha": "dev"})
+	mcpSrv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, &mcp.ServerOptions{})
+
+	push := NewPushController(cfg, mgr, mcpSrv)
+	push.heartbeat = 100 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if n := push.Start(ctx); n != 1 {
+		t.Fatalf("started = %d", n)
+	}
+
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&f.pingCalls) >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	push.Close()
+
+	pings := atomic.LoadInt32(&f.pingCalls)
+	if pings < 2 {
+		t.Fatalf("ping calls = %d, want >= 2 (recovery should have retried)", pings)
+	}
+	if got := atomic.LoadInt32(&f.fsCalls); got < 2 {
+		t.Errorf("FolderSync calls = %d, want >= 2 (initial + recovery)", got)
+	}
+	f.mu.Lock()
+	gap := f.pingTimes[1].Sub(f.pingTimes[0])
+	f.mu.Unlock()
+	// The recovery path skips the 2s backoff, so the gap should be
+	// well under 1s in practice (just an HTTP roundtrip + FolderSync
+	// against the in-process httptest server).
+	if gap >= 1*time.Second {
+		t.Errorf("gap between Ping #1 and #2 = %v; want <1s (recovery should not back off)", gap)
 	}
 }
 
