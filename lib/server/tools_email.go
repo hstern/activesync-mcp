@@ -440,6 +440,14 @@ func parseFormat(s string) (eas.BodyType, string) {
 // --- email_search ----------------------------------------------------------
 
 // EmailSearchInput is the schema for email_search.
+//
+// BodyPreview is a pointer (same rationale as EmailListInput.BodyPreview):
+// distinguishes "field absent → use default" from "explicit 0 → omit
+// body_preview entirely". Without that distinction the existing default
+// fires for callers who explicitly opted out, and Z-Push BackendIMAP
+// returns the full HTML body (often 30-500 KiB per marketing-email hit)
+// regardless of TruncationSize, blowing the 1 MiB MCP result cap on
+// search hits as small as limit=2.
 type EmailSearchInput struct {
 	Account       string `json:"account" jsonschema:"the configured account name"`
 	Query         string `json:"query" jsonschema:"free-text query (server-side full-text search)"`
@@ -447,6 +455,7 @@ type EmailSearchInput struct {
 	DeepTraversal bool   `json:"deep_traversal,omitempty" jsonschema:"include subfolders when folder_id is set"`
 	Limit         int    `json:"limit,omitempty" jsonschema:"max hits to return (default 50)"`
 	Offset        int    `json:"offset,omitempty" jsonschema:"skip this many initial hits (default 0)"`
+	BodyPreview   *int   `json:"body_preview_bytes,omitempty" jsonschema:"include up to N bytes of plain-text body preview per hit (default 256, set 0 to omit body_preview entirely — useful for HTML-heavy folders like marketing-mail inboxes where the server returns the full document instead of honoring TruncationSize)"`
 }
 
 // EmailSearchOutput wraps the matched rows + the server's range/total.
@@ -485,17 +494,39 @@ func registerEmailSearch(s *mcp.Server, m *Manager, accounts []string) {
 		offset := max(in.Offset, 0)
 		end := offset + limit - 1
 		rangeStr := fmt.Sprintf("%d-%d", offset, end)
-		res, err := c.SearchEmail(ctx, in.Query, eas.EmailSearchOptions{
+		// Resolve the requested preview budget the same way email_list
+		// does: nil → 256 (the lib's own default), explicit 0 → omit,
+		// explicit N → cap. The on-wire BodyPreviewBytes is set to 1
+		// when omitting (smallest legal hint) so we don't pay for
+		// bytes we're going to discard. Post-trim is what actually
+		// enforces the budget — Z-Push BackendIMAP returns full HTML
+		// regardless of TruncationSize for HTML-only hits.
+		previewBudget := 256
+		if in.BodyPreview != nil {
+			previewBudget = *in.BodyPreview
+		}
+		if previewBudget < 0 {
+			previewBudget = 0
+		}
+		opts := eas.EmailSearchOptions{
 			FolderID:      in.FolderID,
 			DeepTraversal: in.DeepTraversal,
 			Range:         rangeStr,
-		})
+		}
+		if previewBudget == 0 {
+			opts.BodyPreviewBytes = 1
+		} else {
+			opts.BodyPreviewBytes = previewBudget
+		}
+		res, err := c.SearchEmail(ctx, in.Query, opts)
 		if err != nil {
 			return nil, EmailSearchOutput{}, fmt.Errorf("SearchEmail: %w", err)
 		}
 		out := EmailSearchOutput{Range: res.Range, Total: res.Total}
 		for _, it := range res.Items {
-			out.Items = append(out.Items, emailRowFromItem(it))
+			row := emailRowFromItem(it)
+			row.BodyPreview = trimBodyPreview(row.BodyPreview, previewBudget)
+			out.Items = append(out.Items, row)
 		}
 		return jsonResult(out)
 	})

@@ -677,6 +677,80 @@ func TestEmailList_capsWindowSize(t *testing.T) {
 	})
 }
 
+// searchAndDecode runs email_search through a fake SearchEmail that
+// returns one hit with the supplied body. Returns the first hit's
+// body_preview from the response and a snapshot of opts the handler
+// sent to EAS.
+func searchAndDecode(t *testing.T, in EmailSearchInput, body string) (string, eas.EmailSearchOptions) {
+	t.Helper()
+	var seen eas.EmailSearchOptions
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			SearchEmailFunc: func(_ context.Context, _ string, opts eas.EmailSearchOptions) (*eas.EmailSearchResult, error) {
+				seen = opts
+				return &eas.EmailSearchResult{
+					Total: 1, Range: "0-0",
+					Items: []eas.EmailItem{{ServerID: "1", Subject: "S", Body: body}},
+				}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+	out := callTool(t, s, "email_search", in)
+	items, _ := out["items"].([]any)
+	if len(items) == 0 {
+		t.Fatalf("no items in response: %+v", out)
+	}
+	first := items[0].(map[string]any)
+	bp, _ := first["body_preview"].(string)
+	return bp, seen
+}
+
+func TestEmailSearch_bodyPreviewBytesZeroOmits(t *testing.T) {
+	// Marketing-mail folder scenario from the issue: server returned
+	// 30 KiB of HTML in body_preview ignoring TruncationSize. Caller
+	// asked for 0 — response must omit the body bytes.
+	bp, seen := searchAndDecode(t, EmailSearchInput{
+		Account: "alpha", Query: "x", BodyPreview: ptr(0),
+	}, strings.Repeat("X", 30_000))
+	if bp != "" {
+		t.Errorf("body_preview len = %d, want empty when body_preview_bytes=0", len(bp))
+	}
+	if seen.BodyPreviewBytes > 1024 {
+		t.Errorf("on-wire BodyPreviewBytes = %d, want <=1024 when caller opted out", seen.BodyPreviewBytes)
+	}
+}
+
+func TestEmailSearch_bodyPreviewBytesTrimsOverlongResponse(t *testing.T) {
+	// Caller asked for 256, server returned 30 KiB of HTML. Post-trim
+	// must enforce the budget on the response.
+	bp, _ := searchAndDecode(t, EmailSearchInput{
+		Account: "alpha", Query: "x", BodyPreview: ptr(256),
+	}, strings.Repeat("Y", 30_000))
+	if len(bp) > 256 {
+		t.Errorf("body_preview len = %d, want <= 256", len(bp))
+	}
+	if bp == "" {
+		t.Errorf("body_preview empty; expected truncated content")
+	}
+}
+
+func TestEmailSearch_bodyPreviewBytesAbsentUsesDefault(t *testing.T) {
+	// Field absent → handler uses 256 (the lib's own default surfaced
+	// at the MCP layer for callers' benefit).
+	bp, seen := searchAndDecode(t, EmailSearchInput{
+		Account: "alpha", Query: "x",
+	}, strings.Repeat("Z", 5000))
+	if len(bp) != 256 {
+		t.Errorf("body_preview len = %d, want 256 (default)", len(bp))
+	}
+	if seen.BodyPreviewBytes != 256 {
+		t.Errorf("on-wire BodyPreviewBytes = %d, want 256", seen.BodyPreviewBytes)
+	}
+}
+
 func TestEmailSearch_capsLimit(t *testing.T) {
 	mock := &easmock.Client{
 		EmailClient: easmock.EmailClient{
