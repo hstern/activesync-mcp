@@ -260,7 +260,7 @@ jobs:
           cache: true
 
       - name: bring up testenv
-        working-directory: go-activesync/testenv
+        working-directory: go-activesync/testenv/zpush
         run: |
           docker compose up --build -d
           for i in $(seq 1 90); do
@@ -303,12 +303,12 @@ jobs:
 
       - name: container logs on failure
         if: failure()
-        working-directory: go-activesync/testenv
+        working-directory: go-activesync/testenv/zpush
         run: docker compose logs
 
       - name: tear down
         if: always()
-        working-directory: go-activesync/testenv
+        working-directory: go-activesync/testenv/zpush
         run: docker compose down -v
 
   # ------------------------------------------------------------------------
@@ -333,7 +333,7 @@ jobs:
           cache: true
 
       - name: bring up testenv
-        working-directory: go-activesync/testenv
+        working-directory: go-activesync/testenv/zpush
         run: |
           docker compose up --build -d
           for i in $(seq 1 90); do
@@ -371,10 +371,10 @@ jobs:
 
       - name: container logs on failure
         if: failure()
-        working-directory: go-activesync/testenv
+        working-directory: go-activesync/testenv/zpush
         run: docker compose logs
 
       - name: tear down
         if: always()
-        working-directory: go-activesync/testenv
+        working-directory: go-activesync/testenv/zpush
         run: docker compose down -v
