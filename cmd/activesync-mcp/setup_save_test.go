@@ -128,11 +128,11 @@ func TestEmitConfigTOML_skipsDefaults(t *testing.T) {
 		LogLevel: "info", // default
 		Accounts: []config.Account{{
 			Name: "x", Username: "u", ServerURL: "https://x",
-			DeviceType: "MCP",                  // default
-			ASVersion:  "14.1",                 // default
-			UserAgent:  "activesync-mcp/0.1",   // default
-			DefaultAccess: config.AccessRO,     // default
-			Secret: config.SecretRef{KeyringService: "activesync-mcp", KeyringAccount: "x"},
+			DeviceType:    "MCP",                // default
+			ASVersion:     "14.1",               // default
+			UserAgent:     "activesync-mcp/0.1", // default
+			DefaultAccess: config.AccessRO,      // default
+			Secret:        config.SecretRef{KeyringService: "activesync-mcp", KeyringAccount: "x"},
 		}},
 	}
 	body := emitConfigTOML(in)
@@ -172,10 +172,10 @@ func TestWriteConfigTOML_atomicWrite(t *testing.T) {
 
 func TestTOMLString_quotesSpecialChars(t *testing.T) {
 	cases := map[string]string{
-		"plain":              `"plain"`,
-		`with "quote"`:       `"with \"quote\""`,
-		`back\slash`:         `"back\\slash"`,
-		"control\x07char":    `"control\acontrol char"`, // strconv.Quote will escape \a; we just check it's a quoted form
+		"plain":           `"plain"`,
+		`with "quote"`:    `"with \"quote\""`,
+		`back\slash`:      `"back\\slash"`,
+		"control\x07char": `"control\acontrol char"`, // strconv.Quote will escape \a; we just check it's a quoted form
 	}
 	for in := range cases {
 		got := tomlString(in)

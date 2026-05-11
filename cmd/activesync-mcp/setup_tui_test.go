@@ -85,6 +85,7 @@ func readUntil(t *testing.T, tm *teatest.TestModel, want string) {
 //
 //	BUG:    exitConfig + "open config: no such file or directory"
 //	FIXED:  exitUsageErr + "requires an interactive terminal"
+//
 // stubNonInteractive forces hookIsInteractive to report "not a TTY"
 // for the duration of the test so runSetup hits its non-interactive
 // bail rather than launching bubbletea (which would block on stdin).
