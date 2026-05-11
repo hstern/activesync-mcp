@@ -122,8 +122,15 @@ func startsWith(s, pre string) bool {
 // state dir at test end.
 func e2eClient(t *testing.T) *mcp.ClientSession {
 	t.Helper()
+	return e2eClientWithConfig(t, e2eConfigPath(t))
+}
+
+// e2eClientWithConfig is e2eClient against an arbitrary config path.
+// Tests that need a non-default config (e.g. multi-account) build the
+// TOML themselves and hand it in here.
+func e2eClientWithConfig(t *testing.T, cfg string) *mcp.ClientSession {
+	t.Helper()
 	bin := e2eBinary(t)
-	cfg := e2eConfigPath(t)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	t.Cleanup(cancel)
