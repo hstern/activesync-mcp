@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"activesync-mcp/lib/config"
 	"github.com/hstern/go-activesync/eas"
@@ -98,12 +99,18 @@ func isMailFolder(t eas.FolderType) bool {
 // --- email_list ------------------------------------------------------------
 
 // EmailListInput is the schema for email_list.
+//
+// BodyPreview is a pointer so we can distinguish "field absent → use
+// default 1024" from "field explicitly 0 → omit body_preview entirely".
+// If both collapsed to int(0) the server-side default would always
+// fire and "set 0 to omit" — a documented affordance — would silently
+// not work.
 type EmailListInput struct {
 	Account     string `json:"account" jsonschema:"the configured account name"`
 	FolderID    string `json:"folder_id" jsonschema:"the EAS server-assigned folder identifier (from email_list_folders)"`
 	WindowSize  int    `json:"window_size,omitempty" jsonschema:"max items per response (default 50, server caps usually allow up to 512)"`
 	DateWindow  string `json:"date_window,omitempty" jsonschema:"limit by recency: one of none, 1d, 3d, 1w, 2w, 1m, 3m, 6m (default 2w)"`
-	BodyPreview int    `json:"body_preview_bytes,omitempty" jsonschema:"include up to N bytes of plain-text body preview per item (default 1024, set 0 to omit)"`
+	BodyPreview *int   `json:"body_preview_bytes,omitempty" jsonschema:"include up to N bytes of plain-text body preview per item (default 1024, set 0 to omit body_preview entirely — useful for inboxes with marketing HTML where the server returns the whole document instead of honoring TruncationSize)"`
 	Cursor      string `json:"cursor,omitempty" jsonschema:"pagination cursor; omit for the most recent batch, pass back the sync_cursor from a prior response to fetch the next batch"`
 }
 
@@ -148,28 +155,48 @@ func registerEmailList(s *mcp.Server, m *Manager, accounts []string) {
 		if err := m.PrepareListCursor(ctx, in.Account, in.FolderID, in.Cursor); err != nil {
 			return nil, EmailListOutput{}, fmt.Errorf("PrepareListCursor: %w", err)
 		}
+		// Resolve the requested preview budget:
+		//   nil      → default 1024 bytes
+		//   *p == 0  → omit body_preview from the response (post-trim)
+		//   *p > 0   → cap body_preview at p bytes (post-trim)
+		// Always send a positive TruncationSize on the wire so the server
+		// has an upper bound to honor (when it does); the post-trim is
+		// what *actually* enforces the budget on the response we hand
+		// back, since some Z-Push backends ignore TruncationSize for
+		// HTML-only items and return the whole document.
+		previewBudget := 1024
+		if in.BodyPreview != nil {
+			previewBudget = *in.BodyPreview
+		}
+		if previewBudget < 0 {
+			previewBudget = 0
+		}
 		opts := eas.EmailSyncOptions{
-			WindowSize:         in.WindowSize,
-			BodyType:           eas.BodyTypePlain,
-			BodyTruncationSize: in.BodyPreview,
-			DateFilter:         parseDateWindow(in.DateWindow),
+			WindowSize: in.WindowSize,
+			BodyType:   eas.BodyTypePlain,
+			DateFilter: parseDateWindow(in.DateWindow),
 		}
-		if in.BodyPreview == 0 {
-			opts.BodyTruncationSize = 1024
+		// Even when omitting the preview from the response, ask the
+		// server for a small body — the lib promotes BodyType=None to
+		// Plain, so there's no way to skip the BodyPreference entirely.
+		// 1 byte is the smallest legal hint and minimizes wire size on
+		// servers that *do* honor TruncationSize.
+		if previewBudget == 0 {
+			opts.BodyTruncationSize = 1
+		} else {
+			opts.BodyTruncationSize = previewBudget
 		}
-		// Cap WindowSize × BodyPreview at ~700 KiB so a caller asking
+		// Cap WindowSize × budget at ~700 KiB so a caller asking
 		// for 512 items with 4 KiB previews each can't blow past the
 		// MCP result limit. We prefer trimming WindowSize because
 		// shorter previews are usually less useful to a model than
-		// fewer-but-richer items.
+		// fewer-but-richer items. When the preview is omitted, only
+		// the metadata budget caps WindowSize.
 		if opts.WindowSize == 0 {
 			opts.WindowSize = 50
 		}
-		if opts.BodyTruncationSize == 0 {
-			opts.BodyTruncationSize = 1024
-		}
-		if opts.WindowSize*opts.BodyTruncationSize > 700_000 {
-			opts.WindowSize = 700_000 / opts.BodyTruncationSize
+		if previewBudget > 0 && opts.WindowSize*previewBudget > 700_000 {
+			opts.WindowSize = 700_000 / previewBudget
 			if opts.WindowSize < 1 {
 				opts.WindowSize = 1
 			}
@@ -190,8 +217,36 @@ func registerEmailList(s *mcp.Server, m *Manager, accounts []string) {
 		for _, it := range res.Changed {
 			out.Items = append(out.Items, emailRowFromItem(it))
 		}
+		// Post-trim: enforce previewBudget on the response regardless
+		// of what the server actually sent. This is what makes the
+		// "set 0 to omit" affordance work, and what protects callers
+		// from servers that ignore TruncationSize for HTML bodies and
+		// return the entire marketing-email document.
+		for i := range out.Items {
+			out.Items[i].BodyPreview = trimBodyPreview(out.Items[i].BodyPreview, previewBudget)
+		}
 		return jsonResult(out)
 	})
+}
+
+// trimBodyPreview enforces the caller's body_preview_bytes budget on a
+// single item's preview field. budget == 0 means "omit"; otherwise the
+// field is truncated to at most budget bytes, preserving valid UTF-8 by
+// trimming on rune boundaries (so we don't slice mid-rune and produce
+// garbage on the wire).
+func trimBodyPreview(s string, budget int) string {
+	if budget == 0 || s == "" {
+		return ""
+	}
+	if len(s) <= budget {
+		return s
+	}
+	out := s[:budget]
+	// Walk back to a rune boundary so we don't return half-decoded UTF-8.
+	for len(out) > 0 && !utf8.ValidString(out) {
+		out = out[:len(out)-1]
+	}
+	return out
 }
 
 func emailRowFromItem(it eas.EmailItem) EmailRow {
