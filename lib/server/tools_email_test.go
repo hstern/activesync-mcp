@@ -617,14 +617,17 @@ func TestEmailList_bodyPreviewBytesTrimsOverlongResponse(t *testing.T) {
 func TestEmailList_bodyPreviewBytesAbsentUsesDefault(t *testing.T) {
 	// Field absent in the request → handler must fall back to 1024,
 	// not omit. This is the "noop call" behavior most callers see.
+	// The response is bounded at 1024; the on-wire hint may be larger
+	// (we ask the server for headroom so HTML stripping has enough
+	// raw bytes to extract content — see wireBodyTruncation).
 	bp, seen := listAndDecode(t, EmailListInput{
 		Account: "alpha", FolderID: "i",
-	}, strings.Repeat("Z", 5000))
+	}, strings.Repeat("Z", 50000))
 	if len(bp) != 1024 {
 		t.Errorf("body_preview len = %d, want 1024 (default)", len(bp))
 	}
-	if seen.BodyTruncationSize != 1024 {
-		t.Errorf("on-wire TruncationSize = %d, want 1024", seen.BodyTruncationSize)
+	if seen.BodyTruncationSize < 1024 {
+		t.Errorf("on-wire TruncationSize = %d, want >= 1024 (must cover the response budget)", seen.BodyTruncationSize)
 	}
 }
 
@@ -651,6 +654,143 @@ func utf8ValidShim(s string) bool {
 		}
 	}
 	return true
+}
+
+func TestWireBodyTruncation(t *testing.T) {
+	// Contract: budget=0 → wire=1 (smallest legal hint when caller
+	// opts out); any positive budget → 1 MiB so the stripper has
+	// enough raw HTML to extract a useful preview even from
+	// marketing mail with 80+ KiB of head/style/meta preamble.
+	cases := []struct {
+		budget int
+		want   int
+	}{
+		{0, 1},
+		{1, 1024 * 1024},
+		{256, 1024 * 1024},
+		{4096, 1024 * 1024},
+		{1024 * 1024, 1024 * 1024},
+	}
+	for _, c := range cases {
+		if got := wireBodyTruncation(c.budget); got != c.want {
+			t.Errorf("wireBodyTruncation(%d) = %d, want %d", c.budget, got, c.want)
+		}
+	}
+}
+
+func TestHtmlToPlain(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "tags stripped, entities decoded",
+			in:   `<p>Hello <b>world</b>&amp;goodbye</p>`,
+			want: "Hello world&goodbye",
+		},
+		{
+			name: "doctype + head + meta dropped",
+			in:   `<!DOCTYPE html><html><head><meta charset="utf-8"><title>X</title></head><body>Hi</body></html>`,
+			want: "Hi",
+		},
+		{
+			name: "style + script content dropped",
+			in:   `<html><head><style>.x{color:red;}</style></head><body>visible<script>alert(1)</script></body></html>`,
+			want: "visible",
+		},
+		{
+			name: "br becomes newline",
+			in:   `line1<br>line2<br/>line3`,
+			want: "line1\nline2\nline3",
+		},
+		{
+			name: "block-close becomes newline",
+			in:   `<p>one</p><p>two</p><div>three</div>`,
+			want: "one\ntwo\nthree",
+		},
+		{
+			name: "whitespace runs collapse",
+			in:   "  hello\n\n  \tworld   ",
+			want: "hello world",
+		},
+		{
+			name: "marketing-mail shape",
+			in: `<!DOCTYPE html><html><head><meta content="text/html; charset=UTF-8">` +
+				`<style>body{font-family:Helvetica}</style></head><body>` +
+				`<table><tr><td style="padding:24px"><p>Henry, apply now to ` +
+				`&lsquo;Senior Security Engineer at Cape&rsquo;</p></td></tr></table></body></html>`,
+			want: "Henry, apply now to ‘Senior Security Engineer at Cape’",
+		},
+		{
+			name: "empty input",
+			in:   "",
+			want: "",
+		},
+		{
+			name: "plain text passes through",
+			in:   "no markup here",
+			want: "no markup here",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := htmlToPlain(c.in)
+			if got != c.want {
+				t.Errorf("htmlToPlain(%q):\n  got:  %q\n  want: %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestPreviewFromItem(t *testing.T) {
+	htmlBody := `<html><head><style>x{}</style></head><body>` +
+		`<p>Henry, apply now to <b>Lead Eng at Acme</b></p>` +
+		`<p>Salary: $200k</p></body></html>`
+	plainBody := "Henry, apply now to Lead Eng at Acme\nSalary: $200k"
+
+	t.Run("HTML body is stripped before trim", func(t *testing.T) {
+		got := previewFromItem(eas.EmailItem{
+			BodyType: eas.BodyTypeHTML, Body: htmlBody,
+		}, 60)
+		if got == htmlBody[:60] {
+			t.Errorf("preview is raw HTML, not stripped: %q", got)
+		}
+		if !strings.HasPrefix(got, "Henry, apply now to") {
+			t.Errorf("preview should start with prose, got %q", got)
+		}
+	})
+
+	t.Run("plain body passes through unchanged (modulo trim)", func(t *testing.T) {
+		got := previewFromItem(eas.EmailItem{
+			BodyType: eas.BodyTypePlain, Body: plainBody,
+		}, 1024)
+		if got != plainBody {
+			t.Errorf("plain body should pass through, got %q", got)
+		}
+	})
+
+	t.Run("budget=0 omits regardless of body type", func(t *testing.T) {
+		if got := previewFromItem(eas.EmailItem{
+			BodyType: eas.BodyTypeHTML, Body: htmlBody,
+		}, 0); got != "" {
+			t.Errorf("budget=0 should omit HTML, got %q", got)
+		}
+		if got := previewFromItem(eas.EmailItem{
+			BodyType: eas.BodyTypePlain, Body: plainBody,
+		}, 0); got != "" {
+			t.Errorf("budget=0 should omit plain, got %q", got)
+		}
+	})
+
+	t.Run("HTML body trimmed to budget after stripping", func(t *testing.T) {
+		got := previewFromItem(eas.EmailItem{
+			BodyType: eas.BodyTypeHTML, Body: htmlBody,
+		}, 20)
+		if len(got) > 20 {
+			t.Errorf("budget exceeded: len=%d, got %q", len(got), got)
+		}
+	})
 }
 
 func TestEmailList_capsWindowSize(t *testing.T) {
@@ -738,16 +878,18 @@ func TestEmailSearch_bodyPreviewBytesTrimsOverlongResponse(t *testing.T) {
 }
 
 func TestEmailSearch_bodyPreviewBytesAbsentUsesDefault(t *testing.T) {
-	// Field absent → handler uses 256 (the lib's own default surfaced
-	// at the MCP layer for callers' benefit).
+	// Field absent → response is bounded at 256 (the MCP-side default).
+	// The on-wire hint may be larger because we ask the server for
+	// headroom so HTML stripping has enough raw bytes to extract
+	// content (see wireBodyTruncation).
 	bp, seen := searchAndDecode(t, EmailSearchInput{
 		Account: "alpha", Query: "x",
-	}, strings.Repeat("Z", 5000))
+	}, strings.Repeat("Z", 50000))
 	if len(bp) != 256 {
 		t.Errorf("body_preview len = %d, want 256 (default)", len(bp))
 	}
-	if seen.BodyPreviewBytes != 256 {
-		t.Errorf("on-wire BodyPreviewBytes = %d, want 256", seen.BodyPreviewBytes)
+	if seen.BodyPreviewBytes < 256 {
+		t.Errorf("on-wire BodyPreviewBytes = %d, want >= 256 (must cover the response budget)", seen.BodyPreviewBytes)
 	}
 }
 
