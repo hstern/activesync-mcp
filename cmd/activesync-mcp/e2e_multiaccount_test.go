@@ -176,4 +176,3 @@ func assertPerAccountBuckets(t *testing.T, dbPath string, accounts []string) {
 		}
 	}
 }
-
