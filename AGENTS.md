@@ -29,10 +29,18 @@ testdata/                  e2e config fixtures
 ```
 make ci              # lint + race tests + coverage (PR gate)
 make integration     # tier 2 — needs OS keyring; cross-platform
-make e2e             # tier 3 — needs ../go-activesync/testenv up
+make e2e             # tier 3 — brings up ../go-activesync/testenv/$(STACK)
 make scenario        # tier 4 — multi-call agent-shaped flows
 make fmt             # gofmt -w (fix drift)
 ```
+
+The e2e + scenario targets and CI jobs are parameterised on
+`STACK=` (default `zpush`), mirroring go-activesync's testenv
+matrix. `EAS_INTEGRATION_URL` / `EAS_INTEGRATION_DEVICE` /
+`EAS_INTEGRATION_STACK` are exported to the test process so
+`e2eServerURL()` and `skipOnStack(t, reason, stacks...)` (in
+`cmd/activesync-mcp/e2e_helpers_test.go`) can pick the right
+endpoint and opt out of stacks with known protocol-surface gaps.
 
 ## Hard rules
 
@@ -70,8 +78,8 @@ tier 3, not tier 2.
 |---|---|---|---|
 | Unit | _(none)_ | tool handler logic, MCP boundary glue | always, all 3 OSes |
 | Integration | `integration` | OS surfaces (keyring, bbolt, signals, CLI subcommands) | PRs + main, OS matrix (Linux × {gnome-keyring, kwallet} + mac + win) |
-| End-to-end | `e2e` | binary-spawn + real Z-Push, one tool per test | PRs + main, Linux only |
-| Scenario | `scenario` | multi-call agent-shaped flows + state-change-mid-flight | PRs + main, Linux only |
+| End-to-end | `e2e` | binary-spawn + real EAS server (per-stack matrix), one tool per test | PRs + main, Linux only |
+| Scenario | `scenario` | multi-call agent-shaped flows + state-change-mid-flight (per-stack matrix) | PRs + main, Linux only |
 
 In-process MCP test pattern (used in tier 1 and tier 2):
 
