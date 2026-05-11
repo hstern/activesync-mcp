@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/net/html"
 
 	"activesync-mcp/lib/config"
 	"github.com/hstern/go-activesync/eas"
@@ -176,16 +180,18 @@ func registerEmailList(s *mcp.Server, m *Manager, accounts []string) {
 			BodyType:   eas.BodyTypePlain,
 			DateFilter: parseDateWindow(in.DateWindow),
 		}
-		// Even when omitting the preview from the response, ask the
-		// server for a small body — the lib promotes BodyType=None to
-		// Plain, so there's no way to skip the BodyPreference entirely.
-		// 1 byte is the smallest legal hint and minimizes wire size on
-		// servers that *do* honor TruncationSize.
-		if previewBudget == 0 {
-			opts.BodyTruncationSize = 1
-		} else {
-			opts.BodyTruncationSize = previewBudget
-		}
+		// Wire-size budget separate from response budget:
+		//   - When omitting the preview, ask the server for a 1-byte
+		//     body (smallest legal hint; the lib promotes BodyType=None
+		//     to Plain so we can't skip BodyPreference entirely).
+		//   - Otherwise ask for substantially more than previewBudget.
+		//     Marketing emails carry 2-5 KiB of <head>/<style>/<meta>
+		//     boilerplate before any visible content; if the server
+		//     truncates *raw bytes* at our budget, all the user gets
+		//     after htmlToPlain stripping is empty. Ask for previewBudget*8
+		//     with a 16 KiB floor and 64 KiB cap so HTML stripping has
+		//     enough raw markup to extract previewBudget bytes of text.
+		opts.BodyTruncationSize = wireBodyTruncation(previewBudget)
 		// Cap WindowSize × budget at ~700 KiB so a caller asking
 		// for 512 items with 4 KiB previews each can't blow past the
 		// MCP result limit. We prefer trimming WindowSize because
@@ -210,23 +216,66 @@ func registerEmailList(s *mcp.Server, m *Manager, accounts []string) {
 			SyncCursor:    res.SyncKey,
 		}
 		for _, it := range res.Added {
-			out.Items = append(out.Items, emailRowFromItem(it))
+			row := emailRowFromItem(it)
+			row.BodyPreview = previewFromItem(it, previewBudget)
+			out.Items = append(out.Items, row)
 		}
 		// Surface in-folder Changes (e.g. read flags flipped) as well so
 		// the LLM gets a complete view of what's new since the last sync.
 		for _, it := range res.Changed {
-			out.Items = append(out.Items, emailRowFromItem(it))
-		}
-		// Post-trim: enforce previewBudget on the response regardless
-		// of what the server actually sent. This is what makes the
-		// "set 0 to omit" affordance work, and what protects callers
-		// from servers that ignore TruncationSize for HTML bodies and
-		// return the entire marketing-email document.
-		for i := range out.Items {
-			out.Items[i].BodyPreview = trimBodyPreview(out.Items[i].BodyPreview, previewBudget)
+			row := emailRowFromItem(it)
+			row.BodyPreview = previewFromItem(it, previewBudget)
+			out.Items = append(out.Items, row)
 		}
 		return jsonResult(out)
 	})
+}
+
+// wireBodyTruncation chooses the on-wire BodyTruncationSize /
+// BodyPreviewBytes hint to send to the EAS server, given the user-
+// facing previewBudget (the body_preview_bytes parameter). It exists
+// because:
+//   - We strip HTML to plain text *after* the response arrives, so the
+//     server-side bytes need to cover <head>/<style>/<meta> overhead
+//     before the first byte of visible content.
+//   - Z-Push BackendIMAP (with the BodyPreference TruncationSize patch
+//     deployed) honors the hint exactly, so a tiny budget would cut
+//     the body inside the <head> block and leave nothing for the
+//     stripper to extract.
+//
+// The MCP 1 MiB limit applies to the *response* we hand back to the
+// client, not the EAS wire between us and the mail server. We strip
+// HTML and trim to previewBudget before responding, so it's safe (and
+// necessary) to ask the EAS server for substantially more than the
+// user's budget — otherwise marketing-mail head/style preamble can
+// fill the entire returned slice and the stripper has no body
+// content to extract. Just ask for 1 MiB unconditionally; servers
+// only send what the message actually contains.
+//
+// budget == 0 maps to 1 (the smallest legal hint; the lib forces a
+// BodyPreference element on the wire).
+func wireBodyTruncation(previewBudget int) int {
+	if previewBudget == 0 {
+		return 1
+	}
+	return 1024 * 1024
+}
+
+// previewFromItem renders an item's body as a plain-text preview
+// bounded by budget. HTML bodies are stripped to plain text first
+// (the server may have ignored our request for Type=Plain when the
+// message has no text/plain MIME alternative), so the bytes we ship
+// carry actual content rather than markup. Returns "" when budget==0
+// — that's the documented "omit body_preview" affordance.
+func previewFromItem(it eas.EmailItem, budget int) string {
+	if budget == 0 {
+		return ""
+	}
+	body := it.Body
+	if it.BodyType == eas.BodyTypeHTML {
+		body = htmlToPlain(body)
+	}
+	return trimBodyPreview(body, budget)
 }
 
 // trimBodyPreview enforces the caller's body_preview_bytes budget on a
@@ -247,6 +296,86 @@ func trimBodyPreview(s string, budget int) string {
 		out = out[:len(out)-1]
 	}
 	return out
+}
+
+// htmlToPlain renders an HTML document fragment to plain text suitable
+// for body_preview: tags stripped, entities decoded, runs of whitespace
+// collapsed to a single space, paragraph-level boundaries (`<br>`,
+// closing block-level tags) preserved as line breaks. Content of
+// `<head>`, `<style>`, and `<script>` is dropped — those carry styling
+// and scripting, not user-visible text.
+//
+// The point is "lossy ASCII for triage", not document fidelity. A
+// 200-byte preview should read like prose so a model can decide
+// whether the message is worth a full email_get round-trip.
+func htmlToPlain(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	z := html.NewTokenizer(strings.NewReader(s))
+	skip := 0 // depth inside <head>/<style>/<script>
+	lastWasSpace := true
+	addText := func(t string) {
+		for _, r := range t {
+			if unicode.IsSpace(r) {
+				if !lastWasSpace {
+					b.WriteByte(' ')
+					lastWasSpace = true
+				}
+				continue
+			}
+			b.WriteRune(r)
+			lastWasSpace = false
+		}
+	}
+	addNewline := func() {
+		if b.Len() == 0 || lastWasSpace {
+			return
+		}
+		b.WriteByte('\n')
+		lastWasSpace = true
+	}
+	for {
+		switch z.Next() {
+		case html.ErrorToken:
+			return strings.TrimSpace(b.String())
+		case html.TextToken:
+			if skip == 0 {
+				addText(string(z.Text()))
+			}
+		case html.StartTagToken:
+			name, _ := z.TagName()
+			switch string(name) {
+			case "head", "style", "script":
+				skip++
+			case "body":
+				// HTML5 implicit <head> close. Truncated mail often
+				// gets cut before the explicit </head>; without this,
+				// skip stays > 0 and we never emit the body content.
+				skip = 0
+			case "br", "hr":
+				// HTML5 void elements; tokenizer emits them as
+				// StartTag (no end tag exists in the source).
+				addNewline()
+			}
+		case html.EndTagToken:
+			name, _ := z.TagName()
+			switch string(name) {
+			case "head", "style", "script":
+				if skip > 0 {
+					skip--
+				}
+			case "p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote":
+				addNewline()
+			}
+		case html.SelfClosingTagToken:
+			name, _ := z.TagName()
+			if string(name) == "br" {
+				addNewline()
+			}
+		}
+	}
 }
 
 func emailRowFromItem(it eas.EmailItem) EmailRow {
@@ -527,11 +656,7 @@ func registerEmailSearch(s *mcp.Server, m *Manager, accounts []string) {
 			DeepTraversal: in.DeepTraversal,
 			Range:         rangeStr,
 		}
-		if previewBudget == 0 {
-			opts.BodyPreviewBytes = 1
-		} else {
-			opts.BodyPreviewBytes = previewBudget
-		}
+		opts.BodyPreviewBytes = wireBodyTruncation(previewBudget)
 		res, err := c.SearchEmail(ctx, in.Query, opts)
 		if err != nil {
 			return nil, EmailSearchOutput{}, fmt.Errorf("SearchEmail: %w", err)
@@ -539,7 +664,7 @@ func registerEmailSearch(s *mcp.Server, m *Manager, accounts []string) {
 		out := EmailSearchOutput{Range: res.Range, Total: res.Total}
 		for _, it := range res.Items {
 			row := emailRowFromItem(it)
-			row.BodyPreview = trimBodyPreview(row.BodyPreview, previewBudget)
+			row.BodyPreview = previewFromItem(it, previewBudget)
 			out.Items = append(out.Items, row)
 		}
 		return jsonResult(out)
