@@ -2,6 +2,7 @@
 
 [![ci](https://github.com/hstern/activesync-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/hstern/activesync-mcp/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/hstern/activesync-mcp/branch/main/graph/badge.svg)](https://codecov.io/gh/hstern/activesync-mcp)
+[![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/hstern/activesync-mcp?utm_source=oss&utm_medium=github&utm_campaign=hstern%2Factivesync-mcp&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)](https://coderabbit.ai)
 [![Go Report Card](https://goreportcard.com/badge/github.com/hstern/activesync-mcp)](https://goreportcard.com/report/github.com/hstern/activesync-mcp)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
