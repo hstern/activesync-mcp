@@ -101,6 +101,11 @@ func (v *memFolderCacheView) Apply(fs *eas.FolderSyncResult) error {
 	return nil
 }
 
+func (v *memFolderCacheView) Clear() error {
+	clear(v.store)
+	return nil
+}
+
 // TestEmailListFolders_secondCallStillReturnsCached pins the bug fix:
 // FolderSync is incremental, so the second call returns an empty
 // delta. With a wired FolderCache, email_list_folders must still
@@ -198,6 +203,81 @@ func TestEmailList_passedCursorIsHonored(t *testing.T) {
 	// branch fired by mistake).
 	if got == "0" {
 		t.Error("cursor reset to 0 even though caller supplied K42")
+	}
+}
+
+// TestSyncFolderList_recoversFromStatus9 pins the recovery path
+// for "FolderSync: status 9 (OutOfSpace)" — what some servers
+// (notably Z-Push) return when the SyncKey or server-side
+// per-device state is corrupt and only a fresh-start sync will
+// work. The eas client library auto-retries status 3
+// (InvalidSyncKey); status 9 needs the same handling from us.
+func TestSyncFolderList_recoversFromStatus9(t *testing.T) {
+	calls := 0
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			FolderSyncFunc: func(context.Context) (*eas.FolderSyncResult, error) {
+				calls++
+				if calls == 1 {
+					return nil, &eas.StatusError{Command: "FolderSync", Code: 9}
+				}
+				// After our reset+retry, the server replies with the
+				// full hierarchy as if from key=0.
+				return folderSyncFolders, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	mem := &memFolderCache{}
+	m.SetFolderCache(mem)
+	// Pre-poison the cache with stale folders that no longer exist
+	// on the server. Recovery must drop these.
+	mem.FolderCache("alpha").Apply(&eas.FolderSyncResult{
+		Added: []eas.Folder{
+			{ServerID: "ghost-1", DisplayName: "Stale Folder", Type: eas.FolderTypeUserMail},
+			{ServerID: "ghost-2", DisplayName: "Another Stale", Type: eas.FolderTypeUserMail},
+		},
+	})
+
+	got, err := m.SyncFolderList(t.Context(), "alpha")
+	if err != nil {
+		t.Fatalf("SyncFolderList after status-9: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("FolderSync called %d times, want 2 (status-9 then retry)", calls)
+	}
+	for _, f := range got {
+		if strings.HasPrefix(f.ServerID, "ghost-") {
+			t.Errorf("stale cache entry %q survived recovery: %+v", f.ServerID, got)
+		}
+	}
+}
+
+// TestSyncFolderList_status9RetryFailureSurfaces asserts that a
+// SECOND status-9 (or any other error) from the retry call
+// propagates to the caller — we don't loop indefinitely.
+func TestSyncFolderList_status9RetryFailureSurfaces(t *testing.T) {
+	calls := 0
+	mock := &easmock.Client{
+		FolderClient: easmock.FolderClient{
+			FolderSyncFunc: func(context.Context) (*eas.FolderSyncResult, error) {
+				calls++
+				return nil, &eas.StatusError{Command: "FolderSync", Code: 9}
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	m.SetFolderCache(&memFolderCache{})
+
+	_, err := m.SyncFolderList(t.Context(), "alpha")
+	if err == nil {
+		t.Fatal("want error after retry also fails")
+	}
+	if calls != 2 {
+		t.Errorf("FolderSync called %d times, want 2 (initial + one retry, no more)", calls)
+	}
+	if !strings.Contains(err.Error(), "FolderSync") {
+		t.Errorf("err = %v, want one wrapped under 'FolderSync'", err)
 	}
 }
 

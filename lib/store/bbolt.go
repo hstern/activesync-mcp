@@ -268,3 +268,24 @@ func putFolder(b *bbolt.Bucket, fld eas.Folder) error {
 	}
 	return b.Put([]byte(fld.ServerID), body)
 }
+
+// Clear empties the per-account folder cache. Called in the recovery
+// path when FolderSync returns status 9 (server-side state corrupt):
+// after we reset the SyncKey to "0" and the server replays the full
+// hierarchy in Added, the cache must start fresh — otherwise stale
+// entries from before the corruption would survive the recovery.
+func (f *FolderCache) Clear() error {
+	if err := f.db.Update(func(tx *bbolt.Tx) error {
+		root := tx.Bucket([]byte(bucketFolders))
+		if root == nil {
+			return nil
+		}
+		if root.Bucket(f.account) == nil {
+			return nil
+		}
+		return root.DeleteBucket(f.account)
+	}); err != nil {
+		return fmt.Errorf("store: FolderCache.Clear: %w", err)
+	}
+	return nil
+}

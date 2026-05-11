@@ -37,6 +37,10 @@ type FolderCacheProvider interface {
 type FolderCache interface {
 	All() ([]eas.Folder, error)
 	Apply(*eas.FolderSyncResult) error
+	// Clear empties the cache. Called in the FolderSync status-9
+	// recovery path so a fresh-start re-sync doesn't leave stale
+	// entries alongside the freshly-returned hierarchy.
+	Clear() error
 }
 
 // SecretResolver matches *config.SecretResolver and lets tests inject
@@ -150,12 +154,34 @@ func (m *Manager) PrepareListCursor(ctx context.Context, account, folderID, curs
 // Every *_list_folders handler should call this rather than
 // c.FolderSync directly: it's the seam that makes "what folders do
 // I have?" stay correct across multiple invocations.
+// folderSyncStatusOutOfSpace is the EAS FolderSync status that some
+// servers (notably Z-Push) return when the client's SyncKey or
+// server-side per-device state has gone bad and a fresh-start sync
+// is the only recovery. The eas client library auto-retries
+// status 3 (InvalidSyncKey); status 9 needs the same treatment but
+// from our side because the library doesn't.
+const folderSyncStatusOutOfSpace = 9
+
 func (m *Manager) SyncFolderList(ctx context.Context, accountName string) ([]eas.Folder, error) {
 	c, err := m.Client(ctx, accountName)
 	if err != nil {
 		return nil, err
 	}
 	fs, err := c.FolderSync(ctx)
+	if err != nil && eas.IsStatusCode(err, folderSyncStatusOutOfSpace) {
+		// Server-side state is corrupt. Reset the FolderSync key so
+		// the next call replays from scratch, and clear the local
+		// cache so stale entries don't survive the recovery.
+		if rerr := m.store.AccountState(accountName).SetSyncKey(ctx, eas.FolderRootID, "0"); rerr != nil {
+			return nil, fmt.Errorf("FolderSync recovery: reset sync key: %w", rerr)
+		}
+		if m.folders != nil {
+			if rerr := m.folders.FolderCache(accountName).Clear(); rerr != nil {
+				return nil, fmt.Errorf("FolderSync recovery: clear cache: %w", rerr)
+			}
+		}
+		fs, err = c.FolderSync(ctx)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("FolderSync: %w", err)
 	}

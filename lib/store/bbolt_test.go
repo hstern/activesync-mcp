@@ -281,6 +281,43 @@ func TestFolderCache_persistsAcrossOpen(t *testing.T) {
 	}
 }
 
+func TestFolderCache_Clear(t *testing.T) {
+	db := tempDB(t)
+	cache := db.FolderCache("work")
+	if err := cache.Apply(&eas.FolderSyncResult{
+		Added: []eas.Folder{
+			{ServerID: "inbox", DisplayName: "Inbox"},
+			{ServerID: "sent", DisplayName: "Sent"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cache.All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("after Clear: %d folders, want 0", len(got))
+	}
+	// Clearing again is a no-op (idempotent).
+	if err := cache.Clear(); err != nil {
+		t.Errorf("second Clear: %v", err)
+	}
+	// And the cache is still usable for new applies.
+	if err := cache.Apply(&eas.FolderSyncResult{
+		Added: []eas.Folder{{ServerID: "drafts", DisplayName: "Drafts"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = cache.All()
+	if len(got) != 1 || got[0].ServerID != "drafts" {
+		t.Errorf("post-Clear apply: %+v", got)
+	}
+}
+
 func TestResetAccount_clearsFolderCache(t *testing.T) {
 	db := tempDB(t)
 	if err := db.FolderCache("work").Apply(&eas.FolderSyncResult{
