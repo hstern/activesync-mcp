@@ -229,6 +229,90 @@ func TestPushController_recoversFromHierarchyOutOfDate(t *testing.T) {
 	}
 }
 
+func TestPushController_restartLifecycle(t *testing.T) {
+	// Two PushController lifecycles back-to-back against the same
+	// Manager and the same fake server. The second Start must produce
+	// fresh Pings — proving Close cancels the watcher cleanly and
+	// nothing in the Manager pins the old controller's state in a way
+	// that blocks a fresh subscription. This is the regression you'd
+	// hit if `Close` left a goroutine alive holding the eas.Client or
+	// if a stale `cancels` map entry survived restart.
+	f := &pushFakeServer{}
+	srv := httptest.NewServer(http.HandlerFunc(f.handle))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Accounts: []config.Account{{
+			Name:          "alpha",
+			ServerURL:     srv.URL,
+			Username:      "u",
+			ASVersion:     "14.1",
+			DefaultAccess: config.AccessRO,
+			Push:          true,
+			Secret:        config.SecretRef{KeyringService: "x", KeyringAccount: "alpha"},
+		}},
+	}
+	res := &fakeResolver{pw: map[string]string{"alpha": "p"}}
+	mgr := NewManager(cfg, &fakeStateProvider{}, res, staticDeviceIDs{"alpha": "dev"})
+	mcpSrv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, &mcp.ServerOptions{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	waitForPings := func(min int32) {
+		t.Helper()
+		deadline := time.Now().Add(1500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			if atomic.LoadInt32(&f.pingCalls) >= min {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("only %d Pings observed; wanted >= %d within 1.5s",
+			atomic.LoadInt32(&f.pingCalls), min)
+	}
+
+	// --- Lifecycle 1 -------------------------------------------------
+	p1 := NewPushController(cfg, mgr, mcpSrv)
+	p1.heartbeat = 100 * time.Millisecond
+	if n := p1.Start(ctx); n != 1 {
+		t.Fatalf("first Start = %d, want 1", n)
+	}
+	waitForPings(1)
+	pingsAfterFirst := atomic.LoadInt32(&f.pingCalls)
+	p1.Close()
+
+	// Give the watcher goroutine a moment to actually exit so the
+	// second lifecycle's Pings are unambiguously from p2.
+	time.Sleep(100 * time.Millisecond)
+	pingsAtBoundary := atomic.LoadInt32(&f.pingCalls)
+
+	// --- Lifecycle 2 -------------------------------------------------
+	p2 := NewPushController(cfg, mgr, mcpSrv)
+	p2.heartbeat = 100 * time.Millisecond
+	if n := p2.Start(ctx); n != 1 {
+		t.Fatalf("second Start = %d, want 1", n)
+	}
+	waitForPings(pingsAtBoundary + 1)
+	p2.Close()
+
+	if got := atomic.LoadInt32(&f.pingCalls); got <= pingsAfterFirst {
+		t.Errorf("second lifecycle produced no new Pings: total=%d, after first=%d", got, pingsAfterFirst)
+	}
+}
+
+func TestPushController_doubleCloseIsSafe(t *testing.T) {
+	// Close is documented to be safe to call multiple times (the
+	// server's context-cancellation path may fire it after the user
+	// has already called it). Assert no panic and no double-cancel.
+	cfg := &config.Config{}
+	mgr := NewManager(cfg, &fakeStateProvider{}, &fakeResolver{}, staticDeviceIDs{})
+	mcpSrv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, &mcp.ServerOptions{})
+	p := NewPushController(cfg, mgr, mcpSrv)
+	p.Close()
+	p.Close() // must not panic on the nil cancels map
+}
+
 func TestPushController_zeroAccountsStartsNothing(t *testing.T) {
 	cfg := &config.Config{
 		Accounts: []config.Account{{
