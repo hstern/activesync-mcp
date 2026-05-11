@@ -245,7 +245,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        stack: [zpush]
+        # Each stack carries its own host port + device id, mirroring
+        # go-activesync's integration matrix. Tests that can't pass
+        # against a particular stack opt out via skipOnStack — for
+        # zpush-2.6 the Provision handler returns HTTP 500 on PHP 8,
+        # so e2eClient cascades the skip onto every test that needs
+        # an MCP session against the testenv.
+        include:
+          - stack: zpush
+            url: http://localhost:8580/Microsoft-Server-ActiveSync
+            device: integration00000000000000000000
+          - stack: zpush-2.6
+            url: http://localhost:8583/Microsoft-Server-ActiveSync
+            device: integration00000000000000000003
     steps:
       - uses: actions/checkout@v6
       # GitHub Actions disallows checkout outside the workspace; CI
@@ -283,6 +295,10 @@ jobs:
         run: go install gotest.tools/gotestsum@latest
 
       - name: e2e tests
+        env:
+          EAS_INTEGRATION_URL: ${{ matrix.url }}
+          EAS_INTEGRATION_DEVICE: ${{ matrix.device }}
+          EAS_INTEGRATION_STACK: ${{ matrix.stack }}
         run: |
           gotestsum \
             --junitfile junit-e2e.xml \
@@ -328,7 +344,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        stack: [zpush]
+        include:
+          - stack: zpush
+            url: http://localhost:8580/Microsoft-Server-ActiveSync
+            device: integration00000000000000000000
+          - stack: zpush-2.6
+            url: http://localhost:8583/Microsoft-Server-ActiveSync
+            device: integration00000000000000000003
     steps:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
@@ -356,6 +378,10 @@ jobs:
         run: go install gotest.tools/gotestsum@latest
 
       - name: scenario tests
+        env:
+          EAS_INTEGRATION_URL: ${{ matrix.url }}
+          EAS_INTEGRATION_DEVICE: ${{ matrix.device }}
+          EAS_INTEGRATION_STACK: ${{ matrix.stack }}
         run: |
           gotestsum \
             --junitfile junit-scenario.xml \

@@ -14,8 +14,29 @@ GOBIN ?= $(shell go env GOPATH)/bin
 GOVULNCHECK := $(GOBIN)/govulncheck
 
 # The integration testenv lives in the sibling go-activesync repo. Set
-# GO_ACTIVESYNC_DIR to override (default: ../go-activesync).
+# GO_ACTIVESYNC_DIR to override (default: ../go-activesync). STACK
+# picks the testenv subdir (`zpush`, `zpush-2.6`, …); each stack
+# defines its own port and device ID so the per-test config / env
+# vars below can stay generic.
 GO_ACTIVESYNC_DIR ?= ../go-activesync
+STACK             ?= zpush
+
+# Per-stack EAS endpoint + device ID. Keep in sync with
+# go-activesync/.github/workflows/ci.yml's integration matrix.
+ifeq ($(STACK),zpush-2.6)
+EAS_INTEGRATION_URL    ?= http://localhost:8583/Microsoft-Server-ActiveSync
+EAS_INTEGRATION_DEVICE ?= integration00000000000000000003
+else
+EAS_INTEGRATION_URL    ?= http://localhost:8580/Microsoft-Server-ActiveSync
+EAS_INTEGRATION_DEVICE ?= integration00000000000000000000
+endif
+
+# Surfaced to the test process so e2eServerURL() and skipOnStack pick
+# up the active stack.
+E2E_ENV := \
+    EAS_INTEGRATION_URL=$(EAS_INTEGRATION_URL) \
+    EAS_INTEGRATION_DEVICE=$(EAS_INTEGRATION_DEVICE) \
+    EAS_INTEGRATION_STACK=$(STACK)
 
 .DEFAULT_GOAL := help
 
@@ -100,16 +121,16 @@ integration: ## Tier 2 — integration tests against real OS surfaces
 # ---------------------------------------------------------------------------
 
 .PHONY: e2e
-e2e: testenv-up ## Tier 3 — end-to-end binary spawn against testenv
-	go test -tags e2e -count=1 -timeout 10m ./...
+e2e: testenv-up ## Tier 3 — end-to-end binary spawn against testenv (STACK=zpush|zpush-2.6)
+	$(E2E_ENV) go test -tags e2e -count=1 -timeout 10m ./...
 
 # ---------------------------------------------------------------------------
 # Tier 4: scenario tests. Multi-call agent-shaped flows. Linux only.
 # ---------------------------------------------------------------------------
 
 .PHONY: scenario
-scenario: testenv-up ## Tier 4 — synthetic agent-shaped flows against testenv
-	go test -tags scenario -count=1 -timeout 10m ./...
+scenario: testenv-up ## Tier 4 — synthetic agent-shaped flows against testenv (STACK=zpush|zpush-2.6)
+	$(E2E_ENV) go test -tags scenario -count=1 -timeout 10m ./...
 
 # ---------------------------------------------------------------------------
 # testenv plumbing — bring the sibling go-activesync testenv up / down.
@@ -117,18 +138,18 @@ scenario: testenv-up ## Tier 4 — synthetic agent-shaped flows against testenv
 # ---------------------------------------------------------------------------
 
 .PHONY: testenv-up
-testenv-up: ## Bring the sibling go-activesync testenv up (Z-Push + Dovecot + Postfix + Radicale)
-	@if [ ! -d "$(GO_ACTIVESYNC_DIR)/testenv" ]; then \
-		echo "$(GO_ACTIVESYNC_DIR)/testenv not found"; \
+testenv-up: ## Bring the sibling go-activesync testenv up (STACK=zpush|zpush-2.6)
+	@if [ ! -d "$(GO_ACTIVESYNC_DIR)/testenv/$(STACK)" ]; then \
+		echo "$(GO_ACTIVESYNC_DIR)/testenv/$(STACK) not found"; \
 		echo "clone github.com/hstern/go-activesync as a sibling, or set GO_ACTIVESYNC_DIR=/path/to/clone"; \
 		exit 1; \
 	fi
-	$(MAKE) -C $(GO_ACTIVESYNC_DIR)/testenv up
+	$(MAKE) -C $(GO_ACTIVESYNC_DIR)/testenv STACK=$(STACK) up
 
 .PHONY: testenv-down
-testenv-down: ## Tear the sibling go-activesync testenv down
-	@if [ -d "$(GO_ACTIVESYNC_DIR)/testenv" ]; then \
-		$(MAKE) -C $(GO_ACTIVESYNC_DIR)/testenv down; \
+testenv-down: ## Tear the sibling go-activesync testenv down (STACK=zpush|zpush-2.6)
+	@if [ -d "$(GO_ACTIVESYNC_DIR)/testenv/$(STACK)" ]; then \
+		$(MAKE) -C $(GO_ACTIVESYNC_DIR)/testenv STACK=$(STACK) down; \
 	fi
 
 # ---------------------------------------------------------------------------

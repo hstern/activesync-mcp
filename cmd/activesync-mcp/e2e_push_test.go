@@ -24,19 +24,20 @@ import (
 // assert the notification arrives. Validates the lib/server/push.go
 // controller end-to-end through the MCP boundary.
 func TestE2E_PushNotifyOnInbound(t *testing.T) {
+	skipOnStack(t, "Z-Push 2.6 Provision returns HTTP 500 on PHP 8 (go-activesync#7)", "zpush-2.6")
 	bin := e2eBinary(t)
 	stateDir := t.TempDir()
 	cfgPath := filepath.Join(t.TempDir(), "push.toml")
 	body := fmt.Sprintf(`state_dir = %q
 [[account]]
 name             = "test"
-server_url       = "http://localhost:8580/Microsoft-Server-ActiveSync"
+server_url       = %q
 username         = "integration"
 as_version       = "14.0"
 push             = true
 secret           = { command = ["printf", "%%s", "integration"] }
 default_access   = "rw"
-`, escapeTOMLE2E(stateDir))
+`, escapeTOMLE2E(stateDir), e2eServerURL())
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
