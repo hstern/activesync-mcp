@@ -542,6 +542,117 @@ func TestShrinkEmailGetOutput_overBudgetWithBodyOnly(t *testing.T) {
 	}
 }
 
+// ptr wraps a value as a pointer. Convenience for *int / *bool fields
+// in test inputs where the schema needs to distinguish absent from zero.
+func ptr[T any](v T) *T { return &v }
+
+// listAndDecode runs email_list with the given input through a fake
+// SyncEmail that returns one item with the supplied body. Returns the
+// first item's body_preview from the response and a snapshot of opts
+// the handler sent to EAS.
+func listAndDecode(t *testing.T, in EmailListInput, body string) (string, eas.EmailSyncOptions) {
+	t.Helper()
+	var seen eas.EmailSyncOptions
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			SyncEmailFunc: func(_ context.Context, _ string, opts eas.EmailSyncOptions) (*eas.EmailSyncResult, error) {
+				seen = opts
+				return &eas.EmailSyncResult{
+					SyncKey: "S",
+					Added:   []eas.EmailItem{{ServerID: "1", Subject: "S", Body: body}},
+				}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+	out := callTool(t, s, "email_list", in)
+	items, ok := out["items"].([]any)
+	if !ok || len(items) == 0 {
+		t.Fatalf("response missing items[0]: %+v", out)
+	}
+	first, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("items[0] not an object: %T", items[0])
+	}
+	bp, _ := first["body_preview"].(string) // absent → "" (omitempty)
+	return bp, seen
+}
+
+func TestEmailList_bodyPreviewBytesZeroOmits(t *testing.T) {
+	// Marketing-email scenario: server returned 30 KiB of HTML in
+	// body_preview ignoring our TruncationSize hint. Caller asked for
+	// 0 to opt out — response must contain no body bytes regardless
+	// of what the server sent.
+	bp, seen := listAndDecode(t, EmailListInput{
+		Account: "alpha", FolderID: "i", BodyPreview: ptr(0),
+	}, strings.Repeat("X", 30_000))
+	if bp != "" {
+		t.Errorf("body_preview len = %d, want empty when body_preview_bytes=0", len(bp))
+	}
+	// On the wire we still send a small TruncationSize to be polite to
+	// servers that actually honor it. Don't insist on the exact value
+	// — just that it's small.
+	if seen.BodyTruncationSize > 1024 {
+		t.Errorf("on-wire BodyTruncationSize = %d, want <=1024 when caller opted out", seen.BodyTruncationSize)
+	}
+}
+
+func TestEmailList_bodyPreviewBytesTrimsOverlongResponse(t *testing.T) {
+	// Caller asked for 256 bytes; server (Z-Push BackendIMAP on
+	// HTML-only marketing items) returned 30 KiB anyway. The handler
+	// must trim before responding.
+	bp, _ := listAndDecode(t, EmailListInput{
+		Account: "alpha", FolderID: "i", BodyPreview: ptr(256),
+	}, strings.Repeat("Y", 30_000))
+	if len(bp) > 256 {
+		t.Errorf("body_preview len = %d, want <= 256 (post-trim should enforce budget)", len(bp))
+	}
+	if bp == "" {
+		t.Errorf("body_preview empty; expected truncated content")
+	}
+}
+
+func TestEmailList_bodyPreviewBytesAbsentUsesDefault(t *testing.T) {
+	// Field absent in the request → handler must fall back to 1024,
+	// not omit. This is the "noop call" behavior most callers see.
+	bp, seen := listAndDecode(t, EmailListInput{
+		Account: "alpha", FolderID: "i",
+	}, strings.Repeat("Z", 5000))
+	if len(bp) != 1024 {
+		t.Errorf("body_preview len = %d, want 1024 (default)", len(bp))
+	}
+	if seen.BodyTruncationSize != 1024 {
+		t.Errorf("on-wire TruncationSize = %d, want 1024", seen.BodyTruncationSize)
+	}
+}
+
+func TestTrimBodyPreview_doesNotProduceInvalidUTF8(t *testing.T) {
+	// "é" is two bytes in UTF-8. Trimming a string of "é"s at an odd
+	// budget that lands mid-rune must produce a valid (shorter) UTF-8
+	// string — JSON encoding fails otherwise.
+	in := strings.Repeat("é", 10) // 20 bytes
+	out := trimBodyPreview(in, 5)
+	if !utf8ValidShim(out) {
+		t.Errorf("trimBodyPreview produced invalid UTF-8: %q", out)
+	}
+	if len(out) > 5 {
+		t.Errorf("budget exceeded: len=%d", len(out))
+	}
+}
+
+// utf8ValidShim is a tiny wrapper kept here to avoid importing
+// unicode/utf8 in two places with the same name.
+func utf8ValidShim(s string) bool {
+	for _, r := range s {
+		if r == 0xFFFD && len(s) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func TestEmailList_capsWindowSize(t *testing.T) {
 	// Caller asks for 1000 items × 4 KiB previews = 4 MiB. Handler
 	// must shrink WindowSize so the EAS request stays under the
@@ -562,8 +673,82 @@ func TestEmailList_capsWindowSize(t *testing.T) {
 	registerEmailReadTools(s, m.cfg, m)
 	callTool(t, s, "email_list", EmailListInput{
 		Account: "alpha", FolderID: "i",
-		WindowSize: 1000, BodyPreview: 4096,
+		WindowSize: 1000, BodyPreview: ptr(4096),
 	})
+}
+
+// searchAndDecode runs email_search through a fake SearchEmail that
+// returns one hit with the supplied body. Returns the first hit's
+// body_preview from the response and a snapshot of opts the handler
+// sent to EAS.
+func searchAndDecode(t *testing.T, in EmailSearchInput, body string) (string, eas.EmailSearchOptions) {
+	t.Helper()
+	var seen eas.EmailSearchOptions
+	mock := &easmock.Client{
+		EmailClient: easmock.EmailClient{
+			SearchEmailFunc: func(_ context.Context, _ string, opts eas.EmailSearchOptions) (*eas.EmailSearchResult, error) {
+				seen = opts
+				return &eas.EmailSearchResult{
+					Total: 1, Range: "0-0",
+					Items: []eas.EmailItem{{ServerID: "1", Subject: "S", Body: body}},
+				}, nil
+			},
+		},
+	}
+	m := newMockManager(t, mock, mockManagerOpts{})
+	s := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
+	registerEmailReadTools(s, m.cfg, m)
+	out := callTool(t, s, "email_search", in)
+	items, _ := out["items"].([]any)
+	if len(items) == 0 {
+		t.Fatalf("no items in response: %+v", out)
+	}
+	first := items[0].(map[string]any)
+	bp, _ := first["body_preview"].(string)
+	return bp, seen
+}
+
+func TestEmailSearch_bodyPreviewBytesZeroOmits(t *testing.T) {
+	// Marketing-mail folder scenario from the issue: server returned
+	// 30 KiB of HTML in body_preview ignoring TruncationSize. Caller
+	// asked for 0 — response must omit the body bytes.
+	bp, seen := searchAndDecode(t, EmailSearchInput{
+		Account: "alpha", Query: "x", BodyPreview: ptr(0),
+	}, strings.Repeat("X", 30_000))
+	if bp != "" {
+		t.Errorf("body_preview len = %d, want empty when body_preview_bytes=0", len(bp))
+	}
+	if seen.BodyPreviewBytes > 1024 {
+		t.Errorf("on-wire BodyPreviewBytes = %d, want <=1024 when caller opted out", seen.BodyPreviewBytes)
+	}
+}
+
+func TestEmailSearch_bodyPreviewBytesTrimsOverlongResponse(t *testing.T) {
+	// Caller asked for 256, server returned 30 KiB of HTML. Post-trim
+	// must enforce the budget on the response.
+	bp, _ := searchAndDecode(t, EmailSearchInput{
+		Account: "alpha", Query: "x", BodyPreview: ptr(256),
+	}, strings.Repeat("Y", 30_000))
+	if len(bp) > 256 {
+		t.Errorf("body_preview len = %d, want <= 256", len(bp))
+	}
+	if bp == "" {
+		t.Errorf("body_preview empty; expected truncated content")
+	}
+}
+
+func TestEmailSearch_bodyPreviewBytesAbsentUsesDefault(t *testing.T) {
+	// Field absent → handler uses 256 (the lib's own default surfaced
+	// at the MCP layer for callers' benefit).
+	bp, seen := searchAndDecode(t, EmailSearchInput{
+		Account: "alpha", Query: "x",
+	}, strings.Repeat("Z", 5000))
+	if len(bp) != 256 {
+		t.Errorf("body_preview len = %d, want 256 (default)", len(bp))
+	}
+	if seen.BodyPreviewBytes != 256 {
+		t.Errorf("on-wire BodyPreviewBytes = %d, want 256", seen.BodyPreviewBytes)
+	}
 }
 
 func TestEmailSearch_capsLimit(t *testing.T) {
