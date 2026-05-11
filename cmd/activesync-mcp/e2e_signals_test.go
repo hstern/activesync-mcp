@@ -26,6 +26,7 @@ import (
 )
 
 func TestE2E_SignalDuringInFlightToolCall(t *testing.T) {
+	skipOnStack(t, "Z-Push 2.6 Provision returns HTTP 500 on PHP 8 (go-activesync#7)", "zpush-2.6")
 	bin := e2eBinary(t)
 	cfg := e2eConfigPath(t)
 
