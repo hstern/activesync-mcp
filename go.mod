@@ -11,11 +11,11 @@ require (
 	github.com/charmbracelet/x/exp/teatest v0.0.0-20260510215043-e3181689be6b
 	github.com/hstern/go-activesync v1.1.0
 	github.com/jcmturner/gokrb5/v8 v8.4.4
-	github.com/modelcontextprotocol/go-sdk v1.6.0
+	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78
 	github.com/zalando/go-keyring v0.2.8
-	go.etcd.io/bbolt v1.4.3
-	golang.org/x/net v0.54.0
+	go.etcd.io/bbolt v1.5.0
+	golang.org/x/net v0.56.0
 )
 
 require (
@@ -53,8 +53,8 @@ require (
 	github.com/smallstep/pkcs7 v0.2.1 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	golang.org/x/crypto v0.51.0 // indirect
+	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/sys v0.44.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/text v0.38.0 // indirect
 )
